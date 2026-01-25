@@ -37,7 +37,7 @@ def list_issues(
     team: str | None = None,
     state_type: str | None = None,
     priority: int | None = None,
-    limit: int = 50,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """
     List issues from local cache with optional filters.
@@ -47,13 +47,12 @@ def list_issues(
         team: Filter by team key (e.g., 'UK')
         state_type: Filter by state type (started, unstarted, completed, canceled, backlog)
         priority: Filter by priority (1=Urgent, 2=High, 3=Medium, 4=Low)
-        limit: Maximum number of issues (default 50, max 100)
+        limit: Maximum number of issues (default: all)
 
     Returns:
         Dictionary with issues array and totalCount
     """
     reader = get_reader()
-    limit = min(limit, 100)
 
     assignee_id = None
     if assignee:
@@ -89,7 +88,7 @@ def list_issues(
         filtered.append(issue)
 
     total_count = len(filtered)
-    page = filtered[:limit]
+    page = filtered[:limit] if limit else filtered
 
     results = []
     for issue in page:
@@ -155,7 +154,7 @@ def get_issue(identifier: str) -> dict[str, Any] | None:
 def list_my_issues(
     name: str,
     state_type: str | None = None,
-    limit: int = 30,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """
     List issues assigned to a user.
@@ -163,13 +162,12 @@ def list_my_issues(
     Args:
         name: User name to search for
         state_type: Optional filter (started, unstarted, completed, canceled, backlog)
-        limit: Maximum issues (default 30, max 100)
+        limit: Maximum issues (default: all)
 
     Returns:
         User info with their issues
     """
     reader = get_reader()
-    limit = min(limit, 100)
 
     user = reader.find_user(name)
     if not user:
@@ -191,7 +189,7 @@ def list_my_issues(
             if reader.get_state_type(i.get("stateId", "")) == state_type
         ]
 
-    page = all_issues[:limit]
+    page = all_issues[:limit] if limit else all_issues
 
     results = []
     for issue in page:
