@@ -2,12 +2,26 @@
 
 Fast, read-only MCP server for Linear that reads from Linear.app's local cache on macOS.
 
-**Why?**
-- **Instant**: No API calls, reads directly from local IndexedDB cache
-- **Offline**: Works without internet
-- **Lower context**: Smaller responses for AI assistants
+## Why I Built This
 
-**Use with**: Official Linear MCP for write operations (comments, updates).
+While using the official Linear MCP with Claude Code, I noticed that **read operations consumed too much context**. Every issue query returned verbose responses with metadata I didn't need, eating into the AI's context window.
+
+The problem:
+- Official Linear MCP makes API calls for every read
+- Responses include excessive metadata (full user objects, workflow states, etc.)
+- Context window fills up quickly when exploring issues
+- Slower response times due to network latency
+
+My solution: **Read directly from Linear.app's local cache.**
+
+Linear.app (Electron) syncs all your data to a local IndexedDB. This MCP server reads from that cache, giving you:
+
+- **Zero API calls** - Instant reads from disk
+- **Smaller responses** - Only the fields you need
+- **Offline access** - Works without internet
+- **Faster iteration** - No rate limits, no latency
+
+**Use with**: Official Linear MCP for write operations (comments, status updates, issue creation).
 
 ## Installation
 
