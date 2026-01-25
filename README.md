@@ -139,10 +139,6 @@ ls ~/Library/Application\ Support/Linear/IndexedDB/
 
 The local cache updates when Linear.app syncs. Open Linear.app to refresh.
 
-**Returns 0 issues**
-
-Multiple IndexedDB databases may exist. Version 0.2.2+ automatically finds the correct one.
-
 ## License
 
 MIT
