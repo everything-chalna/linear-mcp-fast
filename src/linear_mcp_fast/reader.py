@@ -171,6 +171,8 @@ class LinearLocalReader:
                             "name": val.get("name"),
                             "type": val.get("type"),
                             "color": val.get("color"),
+                            "teamId": val.get("teamId"),
+                            "position": val.get("position"),
                         }
 
         # Load issues

@@ -86,11 +86,14 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 |------|-------------|
 | `list_issues` | List issues with filters (assignee, team, state, priority) |
 | `get_issue` | Get issue details with comments |
-| `search_issues` | Search issues by title |
-| `get_my_issues` | Get issues assigned to a user |
+| `list_my_issues` | List issues assigned to a user |
 | `list_teams` | List all teams |
+| `get_team` | Get team details |
 | `list_projects` | List all projects |
-| `get_summary` | Get cache summary |
+| `get_project` | Get project details |
+| `list_users` | List all users |
+| `get_user` | Get user details |
+| `list_issue_statuses` | List workflow states for a team |
 
 ### Writing (official Linear MCP)
 

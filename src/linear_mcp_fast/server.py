@@ -31,25 +31,6 @@ def get_reader() -> LinearLocalReader:
     return _reader
 
 
-def _parse_datetime(dt_value: Any) -> float | None:
-    """Parse a datetime value to Unix timestamp."""
-    if dt_value is None:
-        return None
-    if isinstance(dt_value, (int, float)):
-        if dt_value > 1e12:
-            return dt_value / 1000
-        return dt_value
-    if isinstance(dt_value, str):
-        from datetime import datetime
-        try:
-            dt_str = dt_value.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(dt_str)
-            return dt.timestamp()
-        except ValueError:
-            return None
-    return None
-
-
 @mcp.tool()
 def list_issues(
     assignee: str | None = None,
@@ -171,56 +152,13 @@ def get_issue(identifier: str) -> dict[str, Any] | None:
 
 
 @mcp.tool()
-def search_issues(query: str, limit: int = 20) -> dict[str, Any]:
-    """
-    Search issues by title.
-
-    Args:
-        query: Search query (case-insensitive)
-        limit: Maximum results (default 20, max 100)
-
-    Returns:
-        Dictionary with matching issues
-    """
-    reader = get_reader()
-    limit = min(limit, 100)
-    query_lower = query.lower()
-
-    all_issues = sorted(
-        reader.issues.values(),
-        key=lambda x: (x.get("priority") or 4, x.get("id", "")),
-    )
-
-    filtered = []
-    for issue in all_issues:
-        title = issue.get("title", "") or ""
-        identifier = issue.get("identifier", "") or ""
-        if query_lower in title.lower() or query_lower in identifier.lower():
-            filtered.append(issue)
-
-    match_count = len(filtered)
-    page = filtered[:limit]
-
-    results = []
-    for issue in page:
-        results.append({
-            "identifier": issue.get("identifier"),
-            "title": issue.get("title"),
-            "state": reader.get_state_name(issue.get("stateId", "")),
-            "stateType": reader.get_state_type(issue.get("stateId", "")),
-        })
-
-    return {"issues": results, "matchCount": match_count}
-
-
-@mcp.tool()
-def get_my_issues(
+def list_my_issues(
     name: str,
     state_type: str | None = None,
     limit: int = 30,
 ) -> dict[str, Any]:
     """
-    Get issues assigned to a user.
+    List issues assigned to a user.
 
     Args:
         name: User name to search for
@@ -342,24 +280,182 @@ def list_projects(team: str | None = None) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def get_summary() -> dict[str, Any]:
+def get_team(team: str) -> dict[str, Any] | None:
     """
-    Get a summary of local cache data.
+    Get team details by key or name.
+
+    Args:
+        team: Team key (e.g., 'UK') or name
 
     Returns:
-        Counts of teams, users, issues, projects, comments
+        Team details or None if not found
     """
     reader = get_reader()
-    summary = reader.get_summary()
+    team_obj = reader.find_team(team)
 
-    # Add state breakdown
+    if not team_obj:
+        return None
+
+    issue_count = sum(
+        1 for i in reader.issues.values() if i.get("teamId") == team_obj["id"]
+    )
+
+    # Count by state type
     state_counts: dict[str, int] = {}
     for issue in reader.issues.values():
-        state_type = reader.get_state_type(issue.get("stateId", ""))
-        state_counts[state_type] = state_counts.get(state_type, 0) + 1
+        if issue.get("teamId") == team_obj["id"]:
+            state_type = reader.get_state_type(issue.get("stateId", ""))
+            state_counts[state_type] = state_counts.get(state_type, 0) + 1
 
-    summary["issuesByState"] = state_counts
-    return summary
+    return {
+        "id": team_obj.get("id"),
+        "key": team_obj.get("key"),
+        "name": team_obj.get("name"),
+        "description": team_obj.get("description"),
+        "issueCount": issue_count,
+        "issuesByState": state_counts,
+    }
+
+
+@mcp.tool()
+def get_project(name: str) -> dict[str, Any] | None:
+    """
+    Get project details by name.
+
+    Args:
+        name: Project name (partial match)
+
+    Returns:
+        Project details or None if not found
+    """
+    reader = get_reader()
+
+    # Find project by name (partial match)
+    name_lower = name.lower()
+    project = None
+    for p in reader.projects.values():
+        if name_lower in (p.get("name", "") or "").lower():
+            project = p
+            break
+
+    if not project:
+        return None
+
+    issue_count = sum(
+        1 for i in reader.issues.values() if i.get("projectId") == project["id"]
+    )
+
+    # Count by state type
+    state_counts: dict[str, int] = {}
+    for issue in reader.issues.values():
+        if issue.get("projectId") == project["id"]:
+            state_type = reader.get_state_type(issue.get("stateId", ""))
+            state_counts[state_type] = state_counts.get(state_type, 0) + 1
+
+    return {
+        "id": project.get("id"),
+        "name": project.get("name"),
+        "description": project.get("description"),
+        "state": project.get("state"),
+        "startDate": project.get("startDate"),
+        "targetDate": project.get("targetDate"),
+        "issueCount": issue_count,
+        "issuesByState": state_counts,
+    }
+
+
+@mcp.tool()
+def list_users() -> list[dict[str, Any]]:
+    """
+    List all users in the workspace.
+
+    Returns:
+        List of users with basic info
+    """
+    reader = get_reader()
+    results = []
+
+    for user in reader.users.values():
+        issue_count = sum(
+            1 for i in reader.issues.values() if i.get("assigneeId") == user["id"]
+        )
+        results.append({
+            "id": user.get("id"),
+            "name": user.get("name"),
+            "email": user.get("email"),
+            "displayName": user.get("displayName"),
+            "assignedIssueCount": issue_count,
+        })
+
+    results.sort(key=lambda x: x.get("name", "") or "")
+    return results
+
+
+@mcp.tool()
+def get_user(name: str) -> dict[str, Any] | None:
+    """
+    Get user details by name.
+
+    Args:
+        name: User name (partial match)
+
+    Returns:
+        User details or None if not found
+    """
+    reader = get_reader()
+    user = reader.find_user(name)
+
+    if not user:
+        return None
+
+    # Count issues by state
+    state_counts: dict[str, int] = {}
+    for issue in reader.issues.values():
+        if issue.get("assigneeId") == user["id"]:
+            state_type = reader.get_state_type(issue.get("stateId", ""))
+            state_counts[state_type] = state_counts.get(state_type, 0) + 1
+
+    return {
+        "id": user.get("id"),
+        "name": user.get("name"),
+        "email": user.get("email"),
+        "displayName": user.get("displayName"),
+        "assignedIssueCount": sum(state_counts.values()),
+        "issuesByState": state_counts,
+    }
+
+
+@mcp.tool()
+def list_issue_statuses(team: str) -> list[dict[str, Any]]:
+    """
+    List available issue statuses for a team.
+
+    Args:
+        team: Team key (e.g., 'UK')
+
+    Returns:
+        List of workflow states
+    """
+    reader = get_reader()
+
+    team_obj = reader.find_team(team)
+    if not team_obj:
+        return []
+
+    # Get states for this team
+    results = []
+    for state in reader.states.values():
+        if state.get("teamId") == team_obj["id"]:
+            results.append({
+                "id": state.get("id"),
+                "name": state.get("name"),
+                "type": state.get("type"),
+                "color": state.get("color"),
+                "position": state.get("position"),
+            })
+
+    results.sort(key=lambda x: (x.get("position") or 0))
+    return results
 
 
 def main():
