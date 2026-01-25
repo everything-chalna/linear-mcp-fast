@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linear-mcp-fast"
+version = "0.1.0"
+description = "Fast MCP server for Linear - reads from Linear.app's local cache on macOS"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "everything-chalna" }
+]
+keywords = ["linear", "mcp", "cache", "indexeddb", "macos"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "brotli>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/everything-chalna/linear-mcp-fast"
+Repository = "https://github.com/everything-chalna/linear-mcp-fast"
+Issues = "https://github.com/everything-chalna/linear-mcp-fast/issues"
+
+[project.scripts]
+linear-mcp-fast = "linear_mcp_fast:main"
+
+[tool.setuptools.packages.find]
+where = ["src", "vendor/ccl_chromium_reader", "vendor/ccl_simplesnappy"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+"ccl_chromium_reader" = "vendor/ccl_chromium_reader/ccl_chromium_reader"
+"ccl_chromium_reader.serialization_formats" = "vendor/ccl_chromium_reader/ccl_chromium_reader/serialization_formats"
+"ccl_chromium_reader.storage_formats" = "vendor/ccl_chromium_reader/ccl_chromium_reader/storage_formats"
+"ccl_simplesnappy" = "vendor/ccl_simplesnappy/ccl_simplesnappy"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+]
