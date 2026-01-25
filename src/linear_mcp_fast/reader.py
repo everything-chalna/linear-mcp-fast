@@ -75,10 +75,13 @@ class LinearLocalReader:
     def _find_linear_db(
         self, wrapper: ccl_chromium_indexeddb.WrappedIndexDB
     ) -> ccl_chromium_indexeddb.WrappedDatabase:
-        """Find the main Linear database."""
+        """Find the main Linear database with data."""
         for db_id in wrapper.database_ids:
             if "linear_" in db_id.name and db_id.name != "linear_databases":
-                return wrapper[db_id.name, db_id.origin]
+                db = wrapper[db_id.name, db_id.origin]
+                # Skip empty databases
+                if list(db.object_store_names):
+                    return db
         raise ValueError("Could not find Linear database in IndexedDB")
 
     def _to_str(self, val: Any) -> str:
