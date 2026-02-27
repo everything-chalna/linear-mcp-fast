@@ -47,6 +47,12 @@ claude mcp add --transport http linear https://mcp.linear.app/mcp
 
 Run `/mcp` to authenticate with Linear.
 
+If you're developing from a local checkout, use:
+
+```bash
+claude mcp add linear-fast -- uvx --from /path/to/linear-mcp-fast linear-mcp-fast
+```
+
 ### Claude Desktop
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
@@ -126,9 +132,14 @@ Tools mirror the official Linear MCP for easy switching:
 | `list_milestones` | List milestones for a project |
 | `get_milestone` | Get milestone details by project + id/name |
 | `list_project_updates` | List updates for a project |
-| `get_status_updates` | List/get status updates (`type=\"project\"` only) |
+| `get_status_updates` | List/get status updates (`type="project"` only) |
 
 For writes (create issue, add comment, update status), use the official Linear MCP.
+
+### Current read-only limitations
+
+- `get_status_updates` currently supports only `type="project"` (initiative-level status updates are not available from the local cache).
+- Some official MCP filters are intentionally unsupported in `linear-fast` when the equivalent local cache field does not exist.
 
 ## How It Works
 
