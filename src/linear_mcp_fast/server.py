@@ -33,6 +33,40 @@ def get_reader() -> LinearLocalReader:
     return _reader
 
 
+def _serialize_status_update(
+    reader: LinearLocalReader, update: dict[str, Any]
+) -> dict[str, Any]:
+    """Convert a cached project update to MCP response shape."""
+    return {
+        "id": update.get("id"),
+        "body": update.get("body"),
+        "health": update.get("health"),
+        "author": reader.get_user_name(update.get("userId")),
+        "project": reader.get_project_name(update.get("projectId")),
+        "createdAt": update.get("createdAt"),
+        "updatedAt": update.get("updatedAt"),
+    }
+
+
+def _collect_status_updates(
+    reader: LinearLocalReader,
+    project_id: str | None = None,
+    user_id: str | None = None,
+    order_by: str = "createdAt",
+) -> list[dict[str, Any]]:
+    """Collect project status updates with optional filters and sorting."""
+    updates = list(reader.project_updates.values())
+
+    if project_id:
+        updates = [u for u in updates if u.get("projectId") == project_id]
+    if user_id:
+        updates = [u for u in updates if u.get("userId") == user_id]
+
+    sort_key = "updatedAt" if order_by == "updatedAt" else "createdAt"
+    updates.sort(key=lambda x: x.get(sort_key) or "", reverse=True)
+    return updates
+
+
 @mcp.tool()
 def list_issues(
     assignee: str | None = None,
@@ -389,6 +423,44 @@ def list_issue_statuses(team: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+def get_issue_status(
+    team: str,
+    name: str | None = None,
+    id: str | None = None,
+) -> dict[str, Any] | None:
+    """
+    Retrieve detailed information about a specific Linear issue status.
+
+    Args:
+        team: Team name or key
+        name: Status name
+        id: Status ID
+    """
+    reader = get_reader()
+
+    team_obj = reader.find_team(team)
+    if not team_obj:
+        return None
+
+    query = id or name
+    if not query:
+        return None
+
+    status = reader.find_issue_status(team_obj["id"], query)
+    if not status:
+        return None
+
+    return {
+        "id": status.get("id"),
+        "name": status.get("name"),
+        "type": status.get("type"),
+        "color": status.get("color"),
+        "position": status.get("position"),
+        "team": team_obj.get("name"),
+    }
+
+
+@mcp.tool()
 def list_comments(issueId: str) -> list[dict[str, Any]]:
     """
     List comments for a specific Linear issue.
@@ -626,6 +698,126 @@ def list_milestones(project: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+def get_milestone(project: str, query: str) -> dict[str, Any] | None:
+    """
+    Retrieve details of a specific milestone by ID or name.
+
+    Args:
+        project: Project name
+        query: Milestone ID or name
+    """
+    reader = get_reader()
+
+    project_obj = reader.find_project(project)
+    if not project_obj:
+        return None
+
+    milestone = reader.find_milestone(project_obj["id"], query)
+    if not milestone:
+        return None
+
+    progress = milestone.get("currentProgress", {})
+    return {
+        "id": milestone.get("id"),
+        "name": milestone.get("name"),
+        "project": project_obj.get("name"),
+        "targetDate": milestone.get("targetDate"),
+        "sortOrder": milestone.get("sortOrder"),
+        "progress": {
+            "completed": progress.get("completedIssueCount", 0),
+            "started": progress.get("startedIssueCount", 0),
+            "unstarted": progress.get("unstartedIssueCount", 0),
+            "total": progress.get("scopeCount", 0),
+        } if progress else None,
+    }
+
+
+@mcp.tool()
+def get_status_updates(
+    type: str,
+    id: str | None = None,
+    project: str | None = None,
+    initiative: str | None = None,
+    user: str | None = None,
+    includeArchived: bool | None = None,
+    orderBy: str = "createdAt",
+    limit: int = 50,
+    cursor: str | None = None,
+    createdAt: str | None = None,
+    updatedAt: str | None = None,
+) -> dict[str, Any] | None:
+    """
+    List or get project status updates from local cache.
+
+    Args:
+        type: Supported value is "project"
+        id: Status update ID
+        project: Project name
+        initiative: Unsupported in local cache
+        user: User name
+        includeArchived: Unsupported in local cache
+        orderBy: Sort: createdAt | updatedAt
+        limit: Max results (default 50)
+        cursor: Unsupported in local cache
+        createdAt: Unsupported in local cache
+        updatedAt: Unsupported in local cache
+    """
+    reader = get_reader()
+
+    if type != "project":
+        return {"error": "linear-fast supports only get_status_updates(type='project')."}
+
+    unsupported: list[str] = []
+    if initiative:
+        unsupported.append("initiative")
+    if cursor:
+        unsupported.append("cursor")
+    if createdAt:
+        unsupported.append("createdAt")
+    if updatedAt:
+        unsupported.append("updatedAt")
+    if includeArchived:
+        unsupported.append("includeArchived")
+    if unsupported:
+        return {
+            "error": "Unsupported filters for linear-fast: "
+            + ", ".join(unsupported)
+            + "."
+        }
+
+    project_id = None
+    if project:
+        project_obj = reader.find_project(project)
+        if not project_obj:
+            return {"statusUpdates": [], "totalCount": 0}
+        project_id = project_obj["id"]
+
+    user_id = None
+    if user:
+        user_obj = reader.find_user(user)
+        if not user_obj:
+            return {"statusUpdates": [], "totalCount": 0}
+        user_id = user_obj["id"]
+
+    updates = _collect_status_updates(reader, project_id, user_id, orderBy)
+
+    if id:
+        for update in updates:
+            if update.get("id") == id:
+                return _serialize_status_update(reader, update)
+        return None
+
+    total_count = len(updates)
+    if limit and limit > 0:
+        updates = updates[:limit]
+
+    return {
+        "statusUpdates": [_serialize_status_update(reader, u) for u in updates],
+        "totalCount": total_count,
+    }
+
+
+@mcp.tool()
 def list_project_updates(project: str) -> list[dict[str, Any]]:
     """
     List status updates for a project.
@@ -639,18 +831,10 @@ def list_project_updates(project: str) -> list[dict[str, Any]]:
     if not project_obj:
         return []
 
-    updates = reader.get_updates_for_project(project_obj["id"])
-    results = []
-    for update in updates:
-        results.append({
-            "id": update.get("id"),
-            "body": update.get("body"),
-            "health": update.get("health"),
-            "author": reader.get_user_name(update.get("userId")),
-            "createdAt": update.get("createdAt"),
-        })
-
-    return results
+    response = get_status_updates(type="project", project=project, limit=0)
+    if not isinstance(response, dict):
+        return []
+    return response.get("statusUpdates", [])
 
 
 def main():

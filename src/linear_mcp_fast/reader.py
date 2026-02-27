@@ -598,6 +598,38 @@ class LinearLocalReader:
                 return team
         return None
 
+    def find_issue_status(self, team_id: str, query: str) -> dict[str, Any] | None:
+        """Find a workflow state by id or name within a team."""
+        query_lower = query.lower()
+        candidates: list[tuple[int, dict[str, Any]]] = []
+
+        for state in self.states.values():
+            if state.get("teamId") != team_id:
+                continue
+
+            state_id = self._to_str(state.get("id", ""))
+            name = self._to_str(state.get("name", ""))
+            state_id_lower = state_id.lower()
+            name_lower = name.lower()
+
+            if state_id_lower == query_lower:
+                score = 100
+            elif name_lower == query_lower:
+                score = 90
+            elif name_lower.startswith(query_lower):
+                score = 70
+            elif query_lower in name_lower:
+                score = 10
+            else:
+                continue
+
+            candidates.append((score, state))
+
+        if candidates:
+            candidates.sort(key=lambda x: -x[0])
+            return candidates[0][1]
+        return None
+
     def get_issue_by_identifier(self, identifier: str) -> dict[str, Any] | None:
         """Get an issue by its identifier (e.g., 'UK-1234')."""
         identifier_upper = identifier.upper()
@@ -630,6 +662,38 @@ class LinearLocalReader:
                     score = 10
 
                 candidates.append((score, project))
+
+        if candidates:
+            candidates.sort(key=lambda x: -x[0])
+            return candidates[0][1]
+        return None
+
+    def find_milestone(self, project_id: str, query: str) -> dict[str, Any] | None:
+        """Find a milestone by id or name within a project."""
+        query_lower = query.lower()
+        candidates: list[tuple[int, dict[str, Any]]] = []
+
+        for milestone in self.milestones.values():
+            if milestone.get("projectId") != project_id:
+                continue
+
+            milestone_id = self._to_str(milestone.get("id", ""))
+            name = self._to_str(milestone.get("name", ""))
+            milestone_id_lower = milestone_id.lower()
+            name_lower = name.lower()
+
+            if milestone_id_lower == query_lower:
+                score = 100
+            elif name_lower == query_lower:
+                score = 90
+            elif name_lower.startswith(query_lower):
+                score = 70
+            elif query_lower in name_lower:
+                score = 10
+            else:
+                continue
+
+            candidates.append((score, milestone))
 
         if candidates:
             candidates.sort(key=lambda x: -x[0])

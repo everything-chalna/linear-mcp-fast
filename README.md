@@ -115,6 +115,7 @@ Tools mirror the official Linear MCP for easy switching:
 | `list_users` | List all users |
 | `get_user` | Get user details |
 | `list_issue_statuses` | List workflow states for a team |
+| `get_issue_status` | Get workflow state details by team + id/name |
 | `list_comments` | List comments for an issue |
 | `list_issue_labels` | List available issue labels |
 | `list_initiatives` | List all initiatives |
@@ -123,7 +124,9 @@ Tools mirror the official Linear MCP for easy switching:
 | `list_documents` | List documents (optionally by project) |
 | `get_document` | Get document details |
 | `list_milestones` | List milestones for a project |
+| `get_milestone` | Get milestone details by project + id/name |
 | `list_project_updates` | List updates for a project |
+| `get_status_updates` | List/get status updates (`type=\"project\"` only) |
 
 For writes (create issue, add comment, update status), use the official Linear MCP.
 
