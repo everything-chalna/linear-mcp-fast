@@ -16,7 +16,7 @@ mcp = FastMCP(
     instructions=(
         "Fast, read-only access to Linear data from the local Linear.app cache on macOS. "
         "Data freshness depends on Linear.app's last sync. "
-        "For write operations (comments, updates), use the official Linear MCP server."
+        "For write operations (creating/updating issues, comments, projects), use the official Linear MCP server."
     ),
 )
 
@@ -35,22 +35,25 @@ def get_reader() -> LinearLocalReader:
 def list_issues(
     assignee: str | None = None,
     team: str | None = None,
-    state_type: str | None = None,
+    state: str | None = None,
     priority: int | None = None,
-    limit: int | None = None,
+    project: str | None = None,
+    query: str | None = None,
+    orderBy: str = "updatedAt",
+    limit: int = 50,
 ) -> dict[str, Any]:
     """
-    List issues from local cache with optional filters.
+    List issues in the user's Linear workspace. For my issues, use "me" as the assignee.
 
     Args:
-        assignee: Filter by assignee name (partial match)
-        team: Filter by team key (e.g., 'UK')
-        state_type: Filter by state type (started, unstarted, completed, canceled, backlog)
-        priority: Filter by priority (1=Urgent, 2=High, 3=Medium, 4=Low)
-        limit: Maximum number of issues (default: all)
-
-    Returns:
-        Dictionary with issues array and totalCount
+        assignee: User name or "me"
+        team: Team name or key
+        state: State type (started, unstarted, completed, canceled, backlog) or state name
+        priority: 0=None, 1=Urgent, 2=High, 3=Normal, 4=Low
+        project: Project name
+        query: Search issue title
+        orderBy: Sort: createdAt | updatedAt (default: updatedAt)
+        limit: Max results (default 50)
     """
     reader = get_reader()
 
@@ -70,10 +73,18 @@ def list_issues(
         else:
             return {"issues": [], "totalCount": 0}
 
-    all_issues = sorted(
-        reader.issues.values(),
-        key=lambda x: (x.get("priority") or 4, x.get("updatedAt") or ""),
-    )
+    project_id = None
+    if project:
+        project_obj = reader.find_project(project)
+        if project_obj:
+            project_id = project_obj["id"]
+        else:
+            return {"issues": [], "totalCount": 0}
+
+    if orderBy == "createdAt":
+        all_issues = sorted(reader.issues.values(), key=lambda x: x.get("createdAt") or "", reverse=True)
+    else:
+        all_issues = sorted(reader.issues.values(), key=lambda x: x.get("updatedAt") or "", reverse=True)
 
     filtered = []
     for issue in all_issues:
@@ -81,7 +92,14 @@ def list_issues(
             continue
         if team_id and issue.get("teamId") != team_id:
             continue
-        if state_type and reader.get_state_type(issue.get("stateId", "")) != state_type:
+        if state:
+            issue_state_type = reader.get_state_type(issue.get("stateId", ""))
+            issue_state_name = reader.get_state_name(issue.get("stateId", ""))
+            if state.lower() != issue_state_type and state.lower() != (issue_state_name or "").lower():
+                continue
+        if project_id and issue.get("projectId") != project_id:
+            continue
+        if query and query.lower() not in (issue.get("title") or "").lower():
             continue
         if priority is not None and issue.get("priority") != priority:
             continue
@@ -106,18 +124,15 @@ def list_issues(
 
 
 @mcp.tool()
-def get_issue(identifier: str) -> dict[str, Any] | None:
+def get_issue(id: str) -> dict[str, Any] | None:
     """
-    Get issue details by identifier (e.g., 'UK-55').
+    Retrieve detailed information about an issue by ID, including attachments and git branch name.
 
     Args:
-        identifier: Issue identifier like 'UK-55'
-
-    Returns:
-        Issue details with comments, or None if not found
+        id: Issue ID or identifier (e.g., 'UK-55')
     """
     reader = get_reader()
-    issue = reader.get_issue_by_identifier(identifier)
+    issue = reader.get_issue_by_identifier(id)
 
     if not issue:
         return None
@@ -152,12 +167,7 @@ def get_issue(identifier: str) -> dict[str, Any] | None:
 
 @mcp.tool()
 def list_teams() -> list[dict[str, Any]]:
-    """
-    List all teams with issue counts.
-
-    Returns:
-        List of teams
-    """
+    """List teams in the user's Linear workspace."""
     reader = get_reader()
     results = []
 
@@ -178,13 +188,10 @@ def list_teams() -> list[dict[str, Any]]:
 @mcp.tool()
 def list_projects(team: str | None = None) -> list[dict[str, Any]]:
     """
-    List all projects with issue counts.
+    List projects in the user's Linear workspace.
 
     Args:
-        team: Optional team key to filter
-
-    Returns:
-        List of projects
+        team: Team name or key
     """
     reader = get_reader()
 
@@ -218,18 +225,15 @@ def list_projects(team: str | None = None) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def get_team(team: str) -> dict[str, Any] | None:
+def get_team(query: str) -> dict[str, Any] | None:
     """
-    Get team details by key or name.
+    Retrieve details of a specific Linear team.
 
     Args:
-        team: Team key (e.g., 'UK') or name
-
-    Returns:
-        Team details or None if not found
+        query: Team key or name
     """
     reader = get_reader()
-    team_obj = reader.find_team(team)
+    team_obj = reader.find_team(query)
 
     if not team_obj:
         return None
@@ -256,20 +260,17 @@ def get_team(team: str) -> dict[str, Any] | None:
 
 
 @mcp.tool()
-def get_project(name: str) -> dict[str, Any] | None:
+def get_project(query: str) -> dict[str, Any] | None:
     """
-    Get project details by name.
+    Retrieve details of a specific project in Linear.
 
     Args:
-        name: Project name (partial match)
-
-    Returns:
-        Project details or None if not found
+        query: Project name
     """
     reader = get_reader()
 
     # Find project by name (partial match)
-    name_lower = name.lower()
+    name_lower = query.lower()
     project = None
     for p in reader.projects.values():
         if name_lower in (p.get("name", "") or "").lower():
@@ -304,12 +305,7 @@ def get_project(name: str) -> dict[str, Any] | None:
 
 @mcp.tool()
 def list_users() -> list[dict[str, Any]]:
-    """
-    List all users in the workspace.
-
-    Returns:
-        List of users with basic info
-    """
+    """Retrieve users in the Linear workspace."""
     reader = get_reader()
     results = []
 
@@ -330,18 +326,15 @@ def list_users() -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def get_user(name: str) -> dict[str, Any] | None:
+def get_user(query: str) -> dict[str, Any] | None:
     """
-    Get user details by name.
+    Retrieve details of a specific Linear user.
 
     Args:
-        name: User name (partial match)
-
-    Returns:
-        User details or None if not found
+        query: User name or "me"
     """
     reader = get_reader()
-    user = reader.find_user(name)
+    user = reader.find_user(query)
 
     if not user:
         return None
@@ -366,13 +359,10 @@ def get_user(name: str) -> dict[str, Any] | None:
 @mcp.tool()
 def list_issue_statuses(team: str) -> list[dict[str, Any]]:
     """
-    List available issue statuses for a team.
+    List available issue statuses in a Linear team.
 
     Args:
-        team: Team key (e.g., 'UK')
-
-    Returns:
-        List of workflow states
+        team: Team name or key
     """
     reader = get_reader()
 
@@ -397,18 +387,15 @@ def list_issue_statuses(team: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def list_comments(issue_id: str) -> list[dict[str, Any]]:
+def list_comments(issueId: str) -> list[dict[str, Any]]:
     """
-    List comments for a specific issue.
+    List comments for a specific Linear issue.
 
     Args:
-        issue_id: Issue identifier (e.g., 'UK-55')
-
-    Returns:
-        List of comments with author info
+        issueId: Issue identifier (e.g., 'UK-55')
     """
     reader = get_reader()
-    issue = reader.get_issue_by_identifier(issue_id)
+    issue = reader.get_issue_by_identifier(issueId)
 
     if not issue:
         return []
@@ -431,13 +418,10 @@ def list_comments(issue_id: str) -> list[dict[str, Any]]:
 @mcp.tool()
 def list_issue_labels(team: str | None = None) -> list[dict[str, Any]]:
     """
-    List available issue labels.
+    List available issue labels in a Linear workspace or team.
 
     Args:
-        team: Optional team key to filter team-specific labels
-
-    Returns:
-        List of labels
+        team: Team name or key
     """
     reader = get_reader()
 
@@ -465,12 +449,7 @@ def list_issue_labels(team: str | None = None) -> list[dict[str, Any]]:
 
 @mcp.tool()
 def list_initiatives() -> list[dict[str, Any]]:
-    """
-    List all initiatives.
-
-    Returns:
-        List of initiatives
-    """
+    """List initiatives in the user's Linear workspace."""
     reader = get_reader()
     results = []
 
@@ -489,18 +468,15 @@ def list_initiatives() -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def get_initiative(name: str) -> dict[str, Any] | None:
+def get_initiative(query: str) -> dict[str, Any] | None:
     """
-    Get initiative details by name.
+    Retrieve detailed information about a specific initiative in Linear.
 
     Args:
-        name: Initiative name (partial match)
-
-    Returns:
-        Initiative details or None if not found
+        query: Initiative name
     """
     reader = get_reader()
-    initiative = reader.find_initiative(name)
+    initiative = reader.find_initiative(query)
 
     if not initiative:
         return None
@@ -519,19 +495,16 @@ def get_initiative(name: str) -> dict[str, Any] | None:
 
 
 @mcp.tool()
-def list_cycles(team: str) -> list[dict[str, Any]]:
+def list_cycles(teamId: str) -> list[dict[str, Any]]:
     """
-    List cycles for a team.
+    Retrieve cycles for a specific Linear team.
 
     Args:
-        team: Team key (e.g., 'UK')
-
-    Returns:
-        List of cycles sorted by number (newest first)
+        teamId: Team key or name
     """
     reader = get_reader()
 
-    team_obj = reader.find_team(team)
+    team_obj = reader.find_team(teamId)
     if not team_obj:
         return []
 
@@ -559,13 +532,10 @@ def list_cycles(team: str) -> list[dict[str, Any]]:
 @mcp.tool()
 def list_documents(project: str | None = None) -> list[dict[str, Any]]:
     """
-    List documents, optionally filtered by project.
+    List documents in the user's Linear workspace.
 
     Args:
-        project: Optional project name to filter
-
-    Returns:
-        List of documents
+        project: Project name to filter
     """
     reader = get_reader()
 
@@ -595,18 +565,15 @@ def list_documents(project: str | None = None) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def get_document(name: str) -> dict[str, Any] | None:
+def get_document(id: str) -> dict[str, Any] | None:
     """
-    Get document details by title.
+    Retrieve a Linear document by ID or slug.
 
     Args:
-        name: Document title (partial match)
-
-    Returns:
-        Document details or None if not found
+        id: Document title or slug
     """
     reader = get_reader()
-    doc = reader.find_document(name)
+    doc = reader.find_document(id)
 
     if not doc:
         return None
@@ -626,13 +593,10 @@ def get_document(name: str) -> dict[str, Any] | None:
 @mcp.tool()
 def list_milestones(project: str) -> list[dict[str, Any]]:
     """
-    List milestones for a project.
+    List all milestones in a Linear project.
 
     Args:
         project: Project name
-
-    Returns:
-        List of milestones sorted by order
     """
     reader = get_reader()
 
@@ -662,13 +626,10 @@ def list_milestones(project: str) -> list[dict[str, Any]]:
 @mcp.tool()
 def list_project_updates(project: str) -> list[dict[str, Any]]:
     """
-    List updates for a project.
+    List status updates for a project.
 
     Args:
         project: Project name
-
-    Returns:
-        List of project updates sorted by date (newest first)
     """
     reader = get_reader()
 
