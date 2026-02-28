@@ -121,6 +121,8 @@ official_call_tool(name="update_issue", args={...})
 - `LINEAR_OFFICIAL_MCP_URL` (default: `https://mcp.linear.app/mcp`)
 - `LINEAR_OFFICIAL_MCP_HEADERS` (JSON headers, used when transport=`http`)
 - `LINEAR_FAST_COHERENCE_WINDOW_SECONDS` (default: `30`)
+- `LINEAR_FAST_ACCOUNT_EMAILS` (comma-separated; limit local cache to orgs for these account emails)
+- `LINEAR_FAST_USER_ACCOUNT_IDS` (comma-separated; direct account-id scope override)
 
 ## How It Works
 
@@ -138,6 +140,7 @@ Linear.app (Electron)
 - Local reads can be stale; post-write remote-first window reduces mismatch risk.
 - If local parsing is degraded, reads fall back to official MCP.
 - Local `get_status_updates` supports only `type="project"`; others fall back to official MCP.
+- With account scope env vars set, local IndexedDB is filtered to organizations of that account only.
 
 ## Troubleshooting
 
