@@ -33,6 +33,12 @@ LOAD_DOCUMENT_CONTENT = os.getenv("LINEAR_FAST_LOAD_DOCUMENT_CONTENT", "0") == "
 REQUIRED_STORE_KEYS = {"issues", "teams", "users", "workflow_states", "projects"}
 
 
+def _parse_csv_env(var_name: str) -> set[str]:
+    raw = os.getenv(var_name, "")
+    values = [item.strip() for item in raw.split(",")]
+    return {item for item in values if item}
+
+
 @dataclass
 class LocalHealth:
     """Health state for local cache reads."""
@@ -97,6 +103,14 @@ class LinearLocalReader:
         self._cache = CachedData()
         self._reload_lock = threading.Lock()
         self._health = LocalHealth()
+        self._scope_account_emails = (
+            _parse_csv_env("LINEAR_FAST_ACCOUNT_EMAILS")
+            | _parse_csv_env("LINEAR_FAST_ACCOUNT_EMAIL")
+        )
+        self._scope_user_account_ids = (
+            _parse_csv_env("LINEAR_FAST_USER_ACCOUNT_IDS")
+            | _parse_csv_env("LINEAR_FAST_USER_ACCOUNT_ID")
+        )
 
     def _set_degraded(self, reason: str) -> None:
         self._health.degraded = True
@@ -120,6 +134,8 @@ class LinearLocalReader:
             "lastSuccessAt": self._health.last_success_at,
             "loadedAt": self._cache.loaded_at,
             "ttlSeconds": CACHE_TTL_SECONDS,
+            "scopeAccountEmails": sorted(self._scope_account_emails),
+            "scopeUserAccountIds": sorted(self._scope_user_account_ids),
         }
 
     def is_degraded(self) -> bool:
@@ -356,6 +372,167 @@ class LinearLocalReader:
             self._bump_nested(cache.issue_state_counts_by_project, project_id, state_type)
             self._bump_nested(cache.issue_state_counts_by_user, assignee_id, state_type)
 
+    def _is_account_scope_enabled(self) -> bool:
+        return bool(self._scope_account_emails or self._scope_user_account_ids)
+
+    def _apply_account_scope(self, cache: CachedData) -> None:
+        """
+        Restrict cached data to organizations belonging to allowed account(s).
+
+        Scope inputs:
+        - LINEAR_FAST_ACCOUNT_EMAILS / LINEAR_FAST_ACCOUNT_EMAIL
+        - LINEAR_FAST_USER_ACCOUNT_IDS / LINEAR_FAST_USER_ACCOUNT_ID
+        """
+        if not self._is_account_scope_enabled():
+            return
+
+        allowed_account_ids = set(self._scope_user_account_ids)
+        if self._scope_account_emails:
+            for user in cache.users.values():
+                email = self._to_str(user.get("email")).strip().lower()
+                account_id = self._to_str(user.get("userAccountId")).strip()
+                if email in self._scope_account_emails and account_id:
+                    allowed_account_ids.add(account_id)
+
+        if not allowed_account_ids:
+            raise ValueError(
+                "account scope configured but no matching userAccountId found"
+            )
+
+        allowed_org_ids = {
+            self._to_str(user.get("organizationId")).strip()
+            for user in cache.users.values()
+            if self._to_str(user.get("userAccountId")).strip() in allowed_account_ids
+            and self._to_str(user.get("organizationId")).strip()
+        }
+        if not allowed_org_ids:
+            raise ValueError(
+                "account scope configured but no matching organizationId found"
+            )
+
+        cache.users = {
+            user_id: user
+            for user_id, user in cache.users.items()
+            if self._to_str(user.get("organizationId")).strip() in allowed_org_ids
+        }
+        allowed_user_ids = set(cache.users.keys())
+
+        cache.teams = {
+            team_id: team
+            for team_id, team in cache.teams.items()
+            if self._to_str(team.get("organizationId")).strip() in allowed_org_ids
+        }
+        allowed_team_ids = set(cache.teams.keys())
+
+        cache.states = {
+            state_id: state
+            for state_id, state in cache.states.items()
+            if state.get("teamId") in allowed_team_ids
+        }
+
+        cache.issues = {
+            issue_id: issue
+            for issue_id, issue in cache.issues.items()
+            if issue.get("teamId") in allowed_team_ids
+        }
+        allowed_issue_ids = set(cache.issues.keys())
+        cache.issue_content = {
+            issue_id: body
+            for issue_id, body in cache.issue_content.items()
+            if issue_id in allowed_issue_ids
+        }
+
+        cache.comments = {
+            comment_id: comment
+            for comment_id, comment in cache.comments.items()
+            if comment.get("issueId") in allowed_issue_ids
+        }
+        cache.comments_by_issue = {}
+        for comment_id, comment in cache.comments.items():
+            issue_id = comment.get("issueId")
+            if not issue_id:
+                continue
+            cache.comments_by_issue.setdefault(issue_id, []).append(comment_id)
+
+        def _project_allowed(project: dict[str, Any]) -> bool:
+            team_ids = [tid for tid in project.get("teamIds", []) if tid]
+            if team_ids:
+                return any(tid in allowed_team_ids for tid in team_ids)
+
+            lead_id = project.get("leadId")
+            if lead_id and lead_id in allowed_user_ids:
+                return True
+
+            member_ids = [uid for uid in project.get("memberIds", []) if uid]
+            return any(uid in allowed_user_ids for uid in member_ids)
+
+        cache.projects = {
+            project_id: project
+            for project_id, project in cache.projects.items()
+            if _project_allowed(project)
+        }
+        allowed_project_ids = set(cache.projects.keys())
+
+        cache.labels = {
+            label_id: label
+            for label_id, label in cache.labels.items()
+            if not label.get("teamId") or label.get("teamId") in allowed_team_ids
+        }
+
+        def _initiative_allowed(initiative: dict[str, Any]) -> bool:
+            team_ids = [tid for tid in initiative.get("teamIds", []) if tid]
+            if team_ids:
+                return any(tid in allowed_team_ids for tid in team_ids)
+            owner_id = initiative.get("ownerId")
+            return bool(owner_id and owner_id in allowed_user_ids)
+
+        cache.initiatives = {
+            initiative_id: initiative
+            for initiative_id, initiative in cache.initiatives.items()
+            if _initiative_allowed(initiative)
+        }
+
+        cache.cycles = {
+            cycle_id: cycle
+            for cycle_id, cycle in cache.cycles.items()
+            if cycle.get("teamId") in allowed_team_ids
+        }
+
+        cache.documents = {
+            document_id: document
+            for document_id, document in cache.documents.items()
+            if (
+                document.get("projectId") in allowed_project_ids
+                or (
+                    not document.get("projectId")
+                    and document.get("creatorId") in allowed_user_ids
+                )
+            )
+        }
+
+        cache.milestones = {
+            milestone_id: milestone
+            for milestone_id, milestone in cache.milestones.items()
+            if milestone.get("projectId") in allowed_project_ids
+        }
+
+        cache.project_updates = {
+            update_id: update
+            for update_id, update in cache.project_updates.items()
+            if update.get("projectId") in allowed_project_ids
+        }
+
+        allowed_project_status_ids = {
+            project.get("statusId")
+            for project in cache.projects.values()
+            if project.get("statusId")
+        }
+        cache.project_statuses = {
+            status_id: status
+            for status_id, status in cache.project_statuses.items()
+            if status_id in allowed_project_status_ids
+        }
+
     def _reload_cache(self) -> None:
         """Reload all data from all Linear IndexedDB databases."""
         with self._reload_lock:
@@ -371,6 +548,8 @@ class LinearLocalReader:
                     stores = detect_stores(db)
                     detected_keys.update(self._detected_store_keys(stores))
                     self._load_from_db(db, stores, cache, load_errors)
+
+                self._apply_account_scope(cache)
 
                 for project in cache.projects.values():
                     status_id = project.get("statusId")
@@ -410,6 +589,7 @@ class LinearLocalReader:
                     "id": val["id"],
                     "key": val.get("key"),
                     "name": val.get("name"),
+                    "organizationId": val.get("organizationId"),
                 }
 
         if stores.users:
@@ -421,6 +601,9 @@ class LinearLocalReader:
                             "name": val.get("name"),
                             "displayName": val.get("displayName"),
                             "email": val.get("email"),
+                            "organizationId": val.get("organizationId"),
+                            "userAccountId": val.get("userAccountId"),
+                            "active": val.get("active"),
                         }
 
         if stores.workflow_states:
