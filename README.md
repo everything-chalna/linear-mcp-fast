@@ -1,6 +1,9 @@
-# linear-mcp-fast
+# OhMyLinearMCP
 
-Fast, read-only MCP server for Linear that reads from Linear.app's local cache on macOS.
+Fast, unified MCP server for Linear on macOS:
+- local-cache-first reads for speed
+- official MCP fallback for unsupported/degraded reads
+- official MCP passthrough for writes
 
 ## Why I Built This
 
@@ -33,24 +36,27 @@ Linear.app (Electron) syncs all your data to a local IndexedDB. This MCP server 
 
 ## Setup
 
-Use `linear-fast` for reads and the official Linear MCP for writes.
+Add only this server. It handles both local-fast reads and official MCP access.
 
 ### Claude Code
 
 ```bash
-# Fast reads (this package)
-claude mcp add linear-fast -- uvx linear-mcp-fast
-
-# Writes via official Linear MCP
-claude mcp add --transport http linear https://mcp.linear.app/mcp
+claude mcp add oh-my-linearmcp -- uvx oh-my-linearmcp
 ```
 
-Run `/mcp` to authenticate with Linear.
+Legacy CLI alias `linear-mcp-fast` remains available for compatibility.
+
+If your client supports OAuth passthrough for remote MCP, authenticate when prompted.
+
+Optional env vars:
+- `LINEAR_OFFICIAL_MCP_URL` (default: `https://mcp.linear.app/mcp`)
+- `LINEAR_OFFICIAL_MCP_HEADERS` (JSON object of headers for remote MCP requests)
+- `LINEAR_FAST_COHERENCE_WINDOW_SECONDS` (default: `30`)
 
 If you're developing from a local checkout, use:
 
 ```bash
-claude mcp add linear-fast -- uvx --from /path/to/linear-mcp-fast linear-mcp-fast
+claude mcp add oh-my-linearmcp -- uvx --from /path/to/oh-my-linearmcp oh-my-linearmcp
 ```
 
 ### Claude Desktop
@@ -60,13 +66,9 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "linear-fast": {
+    "oh-my-linearmcp": {
       "command": "uvx",
-      "args": ["linear-mcp-fast"]
-    },
-    "linear": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
+      "args": ["oh-my-linearmcp"]
     }
   }
 }
@@ -74,14 +76,14 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ### Cursor
 
-Install Linear MCP from [Cursor's MCP tools page](https://cursor.com/mcp), then add linear-fast:
+Add OhMyLinearMCP:
 
 ```json
 {
   "mcpServers": {
-    "linear-fast": {
+    "oh-my-linearmcp": {
       "command": "uvx",
-      "args": ["linear-mcp-fast"]
+      "args": ["oh-my-linearmcp"]
     }
   }
 }
@@ -92,23 +94,17 @@ Install Linear MCP from [Cursor's MCP tools page](https://cursor.com/mcp), then 
 ```json
 {
   "mcpServers": {
-    "linear-fast": {
+    "oh-my-linearmcp": {
       "command": "uvx",
-      "args": ["linear-mcp-fast"]
-    },
-    "linear": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
+      "args": ["oh-my-linearmcp"]
     }
   }
 }
 ```
 
-See [Linear MCP docs](https://developers.linear.app/docs/ai/mcp-server) for Zed, Codex, v0, and other clients.
-
 ## Available Tools
 
-Tools mirror the official Linear MCP for easy switching:
+Local read tools (cache-first with automatic official fallback):
 
 | Tool | Description |
 |------|-------------|
@@ -134,12 +130,20 @@ Tools mirror the official Linear MCP for easy switching:
 | `list_project_updates` | List updates for a project |
 | `get_status_updates` | List/get status updates (`type="project"` only) |
 
-For writes (create issue, add comment, update status), use the official Linear MCP.
+Unified/official bridge tools:
 
-### Current read-only limitations
+| Tool | Description |
+|------|-------------|
+| `official_call_tool` | Call any official Linear MCP tool by name with args |
+| `list_official_tools` | List available official MCP tools |
+| `refresh_cache` | Force local cache reload |
+| `get_cache_health` | Show local/official health and coherence window state |
 
-- `get_status_updates` currently supports only `type="project"` (initiative-level status updates are not available from the local cache).
-- Some official MCP filters are intentionally unsupported in `linear-fast` when the equivalent local cache field does not exist.
+### Notes and limitations
+
+- Local `get_status_updates` supports only `type="project"`; unsupported filters/types auto-fallback to official MCP.
+- Local reads may be stale relative to recent writes. The server applies a short post-write remote-first coherence window.
+- If local cache parsing degrades, reads fallback to official MCP automatically.
 
 ## How It Works
 
@@ -148,17 +152,17 @@ Linear.app (Electron)
     ↓ syncs data to local cache
 IndexedDB (LevelDB)
 ~/Library/Application Support/Linear/IndexedDB/...
-    ↓ read by
-linear-mcp-fast
-    ↓ decodes Y.js CRDT content
-Fast, offline access to issues, teams, users, projects
+    ↓ local-fast read path (primary)
+OhMyLinearMCP
+    ↓ unsupported/degraded/write
+official Linear MCP
 ```
 
 ### Issue Descriptions
 
 Linear stores issue descriptions in a separate `contentState` field using Y.js CRDT encoding. This package decodes the binary format to extract readable text, so `get_issue` returns the description without an API call.
 
-Note: The extraction is text-based (not full Y.js parsing), so some formatting may be lost. For rich markdown content, use the official Linear MCP.
+Note: The extraction is text-based (not full Y.js parsing), so some formatting may be lost. If local extraction is insufficient, the server can fallback to official MCP.
 
 ## Troubleshooting
 
@@ -171,7 +175,7 @@ ls ~/Library/Application\ Support/Linear/IndexedDB/
 
 **Data seems stale**
 
-The local cache updates when Linear.app syncs. Open Linear.app to refresh.
+The local cache updates when Linear.app syncs. Open Linear.app to refresh, or run `refresh_cache`.
 
 ## License
 

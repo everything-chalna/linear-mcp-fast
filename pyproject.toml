@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "linear-mcp-fast"
+name = "oh-my-linearmcp"
 version = "0.5.0"
-description = "Fast MCP server for Linear - reads from Linear.app's local cache on macOS"
+description = "OhMyLinearMCP - unified Linear MCP (local-fast reads + official fallback/writes) on macOS"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -35,6 +35,7 @@ Repository = "https://github.com/everything-chalna/linear-mcp-fast"
 Issues = "https://github.com/everything-chalna/linear-mcp-fast/issues"
 
 [project.scripts]
+oh-my-linearmcp = "linear_mcp_fast:main"
 linear-mcp-fast = "linear_mcp_fast:main"
 
 [tool.setuptools.packages.find]

@@ -5,10 +5,13 @@ Reads Linear's local IndexedDB cache to provide fast access to issues, users,
 teams, workflow states, and comments without API calls.
 """
 
+from __future__ import annotations
+
 import base64
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,6 +28,21 @@ LINEAR_BLOB_PATH = os.path.expanduser(
 )
 
 CACHE_TTL_SECONDS = 300  # 5 minutes
+LOAD_DOCUMENT_CONTENT = os.getenv("LINEAR_FAST_LOAD_DOCUMENT_CONTENT", "0") == "1"
+
+REQUIRED_STORE_KEYS = {"issues", "teams", "users", "workflow_states", "projects"}
+
+
+@dataclass
+class LocalHealth:
+    """Health state for local cache reads."""
+
+    degraded: bool = False
+    reason: str | None = None
+    failure_count: int = 0
+    last_error: str | None = None
+    last_error_at: float | None = None
+    last_success_at: float | None = None
 
 
 @dataclass
@@ -47,6 +65,15 @@ class CachedData:
     milestones: dict[str, dict[str, Any]] = field(default_factory=dict)
     project_updates: dict[str, dict[str, Any]] = field(default_factory=dict)
     project_statuses: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    issue_counts_by_team: dict[str, int] = field(default_factory=dict)
+    issue_counts_by_project: dict[str, int] = field(default_factory=dict)
+    issue_counts_by_user: dict[str, int] = field(default_factory=dict)
+
+    issue_state_counts_by_team: dict[str, dict[str, int]] = field(default_factory=dict)
+    issue_state_counts_by_project: dict[str, dict[str, int]] = field(default_factory=dict)
+    issue_state_counts_by_user: dict[str, dict[str, int]] = field(default_factory=dict)
+
     loaded_at: float = 0.0
 
     def is_expired(self) -> bool:
@@ -68,6 +95,41 @@ class LinearLocalReader:
         self._db_path = db_path
         self._blob_path = blob_path
         self._cache = CachedData()
+        self._reload_lock = threading.Lock()
+        self._health = LocalHealth()
+
+    def _set_degraded(self, reason: str) -> None:
+        self._health.degraded = True
+        self._health.reason = reason
+        self._health.failure_count += 1
+        self._health.last_error = reason
+        self._health.last_error_at = time.time()
+
+    def _set_healthy(self) -> None:
+        self._health.degraded = False
+        self._health.reason = None
+        self._health.last_success_at = time.time()
+
+    def get_health(self) -> dict[str, Any]:
+        return {
+            "degraded": self._health.degraded,
+            "reason": self._health.reason,
+            "failureCount": self._health.failure_count,
+            "lastError": self._health.last_error,
+            "lastErrorAt": self._health.last_error_at,
+            "lastSuccessAt": self._health.last_success_at,
+            "loadedAt": self._cache.loaded_at,
+            "ttlSeconds": CACHE_TTL_SECONDS,
+        }
+
+    def is_degraded(self) -> bool:
+        return self._health.degraded
+
+    def refresh_cache(self, force: bool = True) -> None:
+        if force:
+            self._reload_cache()
+            return
+        self._ensure_cache()
 
     def _check_db_exists(self) -> None:
         """Verify the Linear database exists."""
@@ -90,7 +152,6 @@ class LinearLocalReader:
         for db_id in wrapper.database_ids:
             if "linear_" in db_id.name and db_id.name != "linear_databases":
                 db = wrapper[db_id.name, db_id.origin]
-                # Skip empty databases
                 if list(db.object_store_names):
                     databases.append(db)
         if not databases:
@@ -113,19 +174,48 @@ class LinearLocalReader:
         try:
             decoded = base64.b64decode(content_state)
             text = decoded.decode("utf-8", errors="replace")
-
-            # Extract readable text (Korean + ASCII printable)
             readable = re.findall(r"[\uac00-\ud7af\u0020-\u007e]+", text)
 
-            # Structural markers to skip (ProseMirror/Y.js)
             skip_exact = {
-                "prosemirror", "paragraph", "heading", "bullet_list", "list_item",
-                "ordered_list", "level", "link", "null", "strong", "em", "code",
-                "table", "table_row", "table_cell", "table_header", "colspan",
-                "rowspan", "colwidth", "issuemention", "label", "href", "title",
-                "order", "attrs", "content", "marks", "type", "text", "doc",
-                "blockquote", "code_block", "hard_break", "horizontal_rule",
-                "image", "suggestion_usermentions", "todo_item", "done", "language",
+                "prosemirror",
+                "paragraph",
+                "heading",
+                "bullet_list",
+                "list_item",
+                "ordered_list",
+                "level",
+                "link",
+                "null",
+                "strong",
+                "em",
+                "code",
+                "table",
+                "table_row",
+                "table_cell",
+                "table_header",
+                "colspan",
+                "rowspan",
+                "colwidth",
+                "issuemention",
+                "label",
+                "href",
+                "title",
+                "order",
+                "attrs",
+                "content",
+                "marks",
+                "type",
+                "text",
+                "doc",
+                "blockquote",
+                "code_block",
+                "hard_break",
+                "horizontal_rule",
+                "image",
+                "suggestion_usermentions",
+                "todo_item",
+                "done",
+                "language",
             }
 
             result = []
@@ -138,44 +228,28 @@ class LinearLocalReader:
                 if r_lower in skip_exact:
                     continue
 
-                # Handle structural markers that include trailing characters.
-                skip_prefixes = {
-                    "suggestion_usermentions", "issuemention", "prosemirror",
-                }
+                skip_prefixes = {"suggestion_usermentions", "issuemention", "prosemirror"}
                 if any(r_lower.startswith(p) for p in skip_prefixes):
                     continue
 
-                # Skip Y.js IDs and encoded strings
                 if re.match(r"^w[\$\)\(A-Z]", r):
                     continue
-
-                # Skip JSON objects and JSON-like patterns
                 if r.startswith("{") or '{"' in r:
                     continue
-
-                # Skip link markers with JSON
                 if r.startswith("link") and "{" in r:
                     continue
-
-                # Skip UUIDs
                 if re.match(r"^[a-f0-9-]{36}$", r):
                     continue
-
-                # Skip single characters or pure numbers
                 if len(r) <= 2 and not re.search(r"[\uac00-\ud7af]", r):
                     continue
 
-                # Skip strings that are mostly special characters
-                if len(r) > 0:
-                    special_ratio = sum(1 for c in r if c in "()[]{}$#@*&^%") / len(r)
-                    if special_ratio > 0.3:
-                        continue
+                special_ratio = sum(1 for c in r if c in "()[]{}$#@*&^%") / len(r)
+                if special_ratio > 0.3:
+                    continue
 
                 result.append(r)
 
-            # Join and clean up
             text = " ".join(result)
-            # Remove excessive whitespace and parentheses artifacts
             text = re.sub(r"\s*\(\s*$", "", text)
             text = re.sub(r"^\s*\)\s*", "", text)
             text = re.sub(r"\s+", " ", text)
@@ -205,65 +279,142 @@ class LinearLocalReader:
                     return "\n"
                 content = node.get("content", [])
                 return "".join(extract(c) for c in content)
-            elif isinstance(node, list):
+            if isinstance(node, list):
                 return "".join(extract(c) for c in node)
             return ""
 
         return extract(body_data)
 
     def _load_from_store(
-        self, db: ccl_chromium_indexeddb.WrappedDatabase, store_name: str
+        self,
+        db: ccl_chromium_indexeddb.WrappedDatabase,
+        store_name: str,
+        load_errors: list[str] | None = None,
     ):
-        """Load all records from a store, handling None values."""
+        """Load all records from a store, collecting errors for degraded health."""
         try:
             store = db[store_name]
             for record in store.iterate_records():
                 if record.value:
                     yield record.value
-        except Exception:
-            pass
+        except Exception as exc:
+            if load_errors is not None:
+                load_errors.append(f"{store_name}: {exc}")
+
+    @staticmethod
+    def _detected_store_keys(stores: DetectedStores) -> set[str]:
+        keys: set[str] = set()
+        if stores.issues:
+            keys.add("issues")
+        if stores.teams:
+            keys.add("teams")
+        if stores.users:
+            keys.add("users")
+        if stores.workflow_states:
+            keys.add("workflow_states")
+        if stores.projects:
+            keys.add("projects")
+        return keys
+
+    @staticmethod
+    def _bump(counter: dict[str, int], key: str | None) -> None:
+        if not key:
+            return
+        counter[key] = counter.get(key, 0) + 1
+
+    @staticmethod
+    def _bump_nested(counter: dict[str, dict[str, int]], key: str | None, state: str) -> None:
+        if not key:
+            return
+        if key not in counter:
+            counter[key] = {}
+        state_counter = counter[key]
+        state_counter[state] = state_counter.get(state, 0) + 1
+
+    def _build_issue_indexes(self, cache: CachedData) -> None:
+        """Build lightweight per-entity issue count indexes for fast handlers."""
+        cache.issue_counts_by_team.clear()
+        cache.issue_counts_by_project.clear()
+        cache.issue_counts_by_user.clear()
+        cache.issue_state_counts_by_team.clear()
+        cache.issue_state_counts_by_project.clear()
+        cache.issue_state_counts_by_user.clear()
+
+        for issue in cache.issues.values():
+            team_id = issue.get("teamId")
+            project_id = issue.get("projectId")
+            assignee_id = issue.get("assigneeId")
+
+            state_id = issue.get("stateId")
+            state_type = cache.states.get(state_id, {}).get("type", "unknown")
+
+            self._bump(cache.issue_counts_by_team, team_id)
+            self._bump(cache.issue_counts_by_project, project_id)
+            self._bump(cache.issue_counts_by_user, assignee_id)
+
+            self._bump_nested(cache.issue_state_counts_by_team, team_id, state_type)
+            self._bump_nested(cache.issue_state_counts_by_project, project_id, state_type)
+            self._bump_nested(cache.issue_state_counts_by_user, assignee_id, state_type)
 
     def _reload_cache(self) -> None:
         """Reload all data from all Linear IndexedDB databases."""
-        wrapper = self._get_wrapper()
-        databases = self._find_all_linear_dbs(wrapper)
+        with self._reload_lock:
+            try:
+                wrapper = self._get_wrapper()
+                databases = self._find_all_linear_dbs(wrapper)
 
-        cache = CachedData(loaded_at=time.time())
+                cache = CachedData(loaded_at=time.time())
+                load_errors: list[str] = []
+                detected_keys: set[str] = set()
 
-        # Load from all databases
-        for db in databases:
-            stores = detect_stores(db)
-            self._load_from_db(db, stores, cache)
+                for db in databases:
+                    stores = detect_stores(db)
+                    detected_keys.update(self._detected_store_keys(stores))
+                    self._load_from_db(db, stores, cache, load_errors)
 
-        # Resolve project state names from statusId after all DBs are loaded.
-        for project in cache.projects.values():
-            status_id = project.get("statusId")
-            if status_id and status_id in cache.project_statuses:
-                project["state"] = cache.project_statuses[status_id].get("name")
+                for project in cache.projects.values():
+                    status_id = project.get("statusId")
+                    if status_id and status_id in cache.project_statuses:
+                        project["state"] = cache.project_statuses[status_id].get("name")
 
-        self._cache = cache
+                self._build_issue_indexes(cache)
+                self._cache = cache
+
+                missing_required = sorted(REQUIRED_STORE_KEYS - detected_keys)
+                if missing_required:
+                    self._set_degraded(
+                        f"missing required stores: {', '.join(missing_required)}"
+                    )
+                elif not cache.issues or not cache.teams or not cache.users:
+                    self._set_degraded("required entities are missing from cache")
+                elif load_errors:
+                    self._set_degraded(f"store read errors: {len(load_errors)}")
+                else:
+                    self._set_healthy()
+            except Exception as exc:
+                self._set_degraded(str(exc))
+                raise
 
     def _load_from_db(
         self,
         db: ccl_chromium_indexeddb.WrappedDatabase,
         stores: DetectedStores,
         cache: CachedData,
+        load_errors: list[str],
     ) -> None:
         """Load data from a single database into the cache."""
 
-        # Load teams
         if stores.teams:
-            for val in self._load_from_store(db, stores.teams):
+            for val in self._load_from_store(db, stores.teams, load_errors):
                 cache.teams[val["id"]] = {
                     "id": val["id"],
                     "key": val.get("key"),
                     "name": val.get("name"),
                 }
 
-        # Load users from all detected user stores
         if stores.users:
             for store_name in stores.users:
-                for val in self._load_from_store(db, store_name):
+                for val in self._load_from_store(db, store_name, load_errors):
                     if val.get("id") not in cache.users:
                         cache.users[val["id"]] = {
                             "id": val["id"],
@@ -272,10 +423,9 @@ class LinearLocalReader:
                             "email": val.get("email"),
                         }
 
-        # Load workflow states from all detected state stores
         if stores.workflow_states:
             for store_name in stores.workflow_states:
-                for val in self._load_from_store(db, store_name):
+                for val in self._load_from_store(db, store_name, load_errors):
                     if val.get("id") not in cache.states:
                         cache.states[val["id"]] = {
                             "id": val["id"],
@@ -286,14 +436,12 @@ class LinearLocalReader:
                             "position": val.get("position"),
                         }
 
-        # Load issues
         if stores.issues:
-            for val in self._load_from_store(db, stores.issues):
+            for val in self._load_from_store(db, stores.issues, load_errors):
                 team = cache.teams.get(val.get("teamId"), {})
                 team_key = team.get("key", "???")
                 identifier = f"{team_key}-{val.get('number')}"
 
-                # Try descriptionData (ProseMirror format) first, fall back to description
                 description = val.get("description")
                 if not description and val.get("descriptionData"):
                     description = self._extract_comment_text(val.get("descriptionData"))
@@ -316,9 +464,8 @@ class LinearLocalReader:
                     "updatedAt": val.get("updatedAt"),
                 }
 
-        # Load comments
         if stores.comments:
-            for val in self._load_from_store(db, stores.comments):
+            for val in self._load_from_store(db, stores.comments, load_errors):
                 comment_id = val.get("id")
                 issue_id = val.get("issueId")
                 if not comment_id or not issue_id:
@@ -337,9 +484,8 @@ class LinearLocalReader:
                     cache.comments_by_issue[issue_id] = []
                 cache.comments_by_issue[issue_id].append(comment_id)
 
-        # Load projects
         if stores.projects:
-            for val in self._load_from_store(db, stores.projects):
+            for val in self._load_from_store(db, stores.projects, load_errors):
                 cache.projects[val["id"]] = {
                     "id": val["id"],
                     "name": val.get("name"),
@@ -359,9 +505,8 @@ class LinearLocalReader:
                     "updatedAt": val.get("updatedAt"),
                 }
 
-        # Load issue content (Y.js encoded descriptions)
         if stores.issue_content:
-            for val in self._load_from_store(db, stores.issue_content):
+            for val in self._load_from_store(db, stores.issue_content, load_errors):
                 issue_id = val.get("issueId")
                 content_state = val.get("contentState")
                 if issue_id and content_state:
@@ -369,15 +514,13 @@ class LinearLocalReader:
                     if extracted:
                         cache.issue_content[issue_id] = extracted
 
-        # Update issues with descriptions from issue_content
         for issue_id, desc in cache.issue_content.items():
             if issue_id in cache.issues and not cache.issues[issue_id].get("description"):
                 cache.issues[issue_id]["description"] = desc
 
-        # Load labels from all detected label stores
         if stores.labels:
             for store_name in stores.labels:
-                for val in self._load_from_store(db, store_name):
+                for val in self._load_from_store(db, store_name, load_errors):
                     if val.get("id") not in cache.labels:
                         cache.labels[val["id"]] = {
                             "id": val["id"],
@@ -388,9 +531,8 @@ class LinearLocalReader:
                             "teamId": val.get("teamId"),
                         }
 
-        # Load initiatives
         if stores.initiatives:
-            for val in self._load_from_store(db, stores.initiatives):
+            for val in self._load_from_store(db, stores.initiatives, load_errors):
                 cache.initiatives[val["id"]] = {
                     "id": val["id"],
                     "name": val.get("name"),
@@ -403,9 +545,8 @@ class LinearLocalReader:
                     "updatedAt": val.get("updatedAt"),
                 }
 
-        # Load cycles
         if stores.cycles:
-            for val in self._load_from_store(db, stores.cycles):
+            for val in self._load_from_store(db, stores.cycles, load_errors):
                 cache.cycles[val["id"]] = {
                     "id": val["id"],
                     "number": val.get("number"),
@@ -416,11 +557,9 @@ class LinearLocalReader:
                     "currentProgress": val.get("currentProgress"),
                 }
 
-        # Load documents
         if stores.documents:
-            for val in self._load_from_store(db, stores.documents):
+            for val in self._load_from_store(db, stores.documents, load_errors):
                 doc_id = val.get("id")
-                # Documents may have multiple versions, keep the latest by updatedAt
                 existing = cache.documents.get(doc_id)
                 if existing and existing.get("updatedAt", "") >= val.get("updatedAt", ""):
                     continue
@@ -434,9 +573,8 @@ class LinearLocalReader:
                     "updatedAt": val.get("updatedAt"),
                 }
 
-        # Load document content
-        if stores.document_content:
-            for val in self._load_from_store(db, stores.document_content):
+        if LOAD_DOCUMENT_CONTENT and stores.document_content:
+            for val in self._load_from_store(db, stores.document_content, load_errors):
                 content_id = val.get("documentContentId")
                 if content_id:
                     cache.document_content[content_id] = {
@@ -445,9 +583,8 @@ class LinearLocalReader:
                         "contentData": val.get("contentData"),
                     }
 
-        # Load milestones
         if stores.milestones:
-            for val in self._load_from_store(db, stores.milestones):
+            for val in self._load_from_store(db, stores.milestones, load_errors):
                 cache.milestones[val["id"]] = {
                     "id": val["id"],
                     "name": val.get("name"),
@@ -457,9 +594,8 @@ class LinearLocalReader:
                     "currentProgress": val.get("currentProgress"),
                 }
 
-        # Load project statuses
         if stores.project_statuses:
-            for val in self._load_from_store(db, stores.project_statuses):
+            for val in self._load_from_store(db, stores.project_statuses, load_errors):
                 status_id = val.get("id")
                 if status_id and status_id not in cache.project_statuses:
                     cache.project_statuses[status_id] = {
@@ -469,9 +605,8 @@ class LinearLocalReader:
                         "type": val.get("type"),
                     }
 
-        # Load project updates
         if stores.project_updates:
-            for val in self._load_from_store(db, stores.project_updates):
+            for val in self._load_from_store(db, stores.project_updates, load_errors):
                 cache.project_updates[val["id"]] = {
                     "id": val["id"],
                     "body": val.get("body"),
@@ -490,73 +625,83 @@ class LinearLocalReader:
 
     @property
     def teams(self) -> dict[str, dict[str, Any]]:
-        """Get all teams."""
         return self._ensure_cache().teams
 
     @property
     def users(self) -> dict[str, dict[str, Any]]:
-        """Get all users."""
         return self._ensure_cache().users
 
     @property
     def states(self) -> dict[str, dict[str, Any]]:
-        """Get all workflow states."""
         return self._ensure_cache().states
 
     @property
     def issues(self) -> dict[str, dict[str, Any]]:
-        """Get all issues."""
         return self._ensure_cache().issues
 
     @property
     def comments(self) -> dict[str, dict[str, Any]]:
-        """Get all comments."""
         return self._ensure_cache().comments
 
     @property
     def projects(self) -> dict[str, dict[str, Any]]:
-        """Get all projects."""
         return self._ensure_cache().projects
 
     @property
     def labels(self) -> dict[str, dict[str, Any]]:
-        """Get all labels."""
         return self._ensure_cache().labels
 
     @property
     def initiatives(self) -> dict[str, dict[str, Any]]:
-        """Get all initiatives."""
         return self._ensure_cache().initiatives
 
     @property
     def cycles(self) -> dict[str, dict[str, Any]]:
-        """Get all cycles."""
         return self._ensure_cache().cycles
 
     @property
     def documents(self) -> dict[str, dict[str, Any]]:
-        """Get all documents."""
         return self._ensure_cache().documents
 
     @property
     def milestones(self) -> dict[str, dict[str, Any]]:
-        """Get all milestones."""
         return self._ensure_cache().milestones
 
     @property
     def project_updates(self) -> dict[str, dict[str, Any]]:
-        """Get all project updates."""
         return self._ensure_cache().project_updates
 
+    def get_issue_count_for_team(self, team_id: str | None) -> int:
+        cache = self._ensure_cache()
+        return cache.issue_counts_by_team.get(team_id or "", 0)
+
+    def get_issue_count_for_project(self, project_id: str | None) -> int:
+        cache = self._ensure_cache()
+        return cache.issue_counts_by_project.get(project_id or "", 0)
+
+    def get_issue_count_for_user(self, user_id: str | None) -> int:
+        cache = self._ensure_cache()
+        return cache.issue_counts_by_user.get(user_id or "", 0)
+
+    def get_issue_state_counts_for_team(self, team_id: str | None) -> dict[str, int]:
+        cache = self._ensure_cache()
+        return dict(cache.issue_state_counts_by_team.get(team_id or "", {}))
+
+    def get_issue_state_counts_for_project(self, project_id: str | None) -> dict[str, int]:
+        cache = self._ensure_cache()
+        return dict(cache.issue_state_counts_by_project.get(project_id or "", {}))
+
+    def get_issue_state_counts_for_user(self, user_id: str | None) -> dict[str, int]:
+        cache = self._ensure_cache()
+        return dict(cache.issue_state_counts_by_user.get(user_id or "", {}))
+
     def get_comments_for_issue(self, issue_id: str) -> list[dict[str, Any]]:
-        """Get all comments for an issue, sorted by creation time."""
         cache = self._ensure_cache()
         comment_ids = cache.comments_by_issue.get(issue_id, [])
         comments = [cache.comments[cid] for cid in comment_ids if cid in cache.comments]
         return sorted(comments, key=lambda c: c.get("createdAt", ""))
 
     def find_user(self, search: str) -> dict[str, Any] | None:
-        """Find a user by name or display name (case-insensitive partial match)."""
         search_lower = search.lower()
         candidates: list[tuple[int, dict[str, Any]]] = []
 
@@ -577,7 +722,6 @@ class LinearLocalReader:
                     score = 40
                 else:
                     score = 10
-
                 candidates.append((score, user))
 
         if candidates:
@@ -586,20 +730,17 @@ class LinearLocalReader:
         return None
 
     def find_team(self, search: str) -> dict[str, Any] | None:
-        """Find a team by key or name (case-insensitive)."""
         search_lower = search.lower()
         search_upper = search.upper()
 
         for team in self.teams.values():
             key = team.get("key", "")
             name = self._to_str(team.get("name", ""))
-
             if key == search_upper or search_lower in name.lower():
                 return team
         return None
 
     def find_issue_status(self, team_id: str, query: str) -> dict[str, Any] | None:
-        """Find a workflow state by id or name within a team."""
         query_lower = query.lower()
         candidates: list[tuple[int, dict[str, Any]]] = []
 
@@ -631,7 +772,6 @@ class LinearLocalReader:
         return None
 
     def get_issue_by_identifier(self, identifier: str) -> dict[str, Any] | None:
-        """Get an issue by its identifier (e.g., 'UK-1234')."""
         identifier_upper = identifier.upper()
         for issue in self.issues.values():
             if issue.get("identifier", "").upper() == identifier_upper:
@@ -639,14 +779,12 @@ class LinearLocalReader:
         return None
 
     def find_project(self, search: str) -> dict[str, Any] | None:
-        """Find a project by name or slugId (case-insensitive partial match)."""
         search_lower = search.lower()
         candidates: list[tuple[int, dict[str, Any]]] = []
 
         for project in self.projects.values():
             name = self._to_str(project.get("name", ""))
             slug_id = self._to_str(project.get("slugId", ""))
-
             name_lower = name.lower()
             slug_lower = slug_id.lower()
 
@@ -660,7 +798,6 @@ class LinearLocalReader:
                     score = 70
                 else:
                     score = 10
-
                 candidates.append((score, project))
 
         if candidates:
@@ -669,7 +806,6 @@ class LinearLocalReader:
         return None
 
     def find_milestone(self, project_id: str, query: str) -> dict[str, Any] | None:
-        """Find a milestone by id or name within a project."""
         query_lower = query.lower()
         candidates: list[tuple[int, dict[str, Any]]] = []
 
@@ -701,39 +837,28 @@ class LinearLocalReader:
         return None
 
     def get_issues_for_user(self, user_id: str) -> list[dict[str, Any]]:
-        """Get all issues assigned to a user."""
-        return [
-            issue
-            for issue in self.issues.values()
-            if issue.get("assigneeId") == user_id
-        ]
+        return [issue for issue in self.issues.values() if issue.get("assigneeId") == user_id]
 
     def get_state_name(self, state_id: str) -> str:
-        """Get state name from state ID."""
         state = self.states.get(state_id, {})
         return state.get("name", "Unknown")
 
     def get_state_type(self, state_id: str) -> str:
-        """Get state type from state ID."""
         state = self.states.get(state_id, {})
         return state.get("type", "unknown")
 
     def search_issues(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
-        """Search issues by title (case-insensitive)."""
         query_lower = query.lower()
         results = []
-
         for issue in self.issues.values():
             title = self._to_str(issue.get("title", ""))
             if query_lower in title.lower():
                 results.append(issue)
                 if len(results) >= limit:
                     break
-
         return results
 
     def get_summary(self) -> dict[str, int]:
-        """Get a summary of loaded data counts."""
         cache = self._ensure_cache()
         return {
             "teams": len(cache.teams),
@@ -745,54 +870,45 @@ class LinearLocalReader:
         }
 
     def get_user_name(self, user_id: str | None) -> str:
-        """Get user name from user ID."""
         if not user_id:
             return "Unassigned"
         user = self.users.get(user_id, {})
         return user.get("name") or user.get("displayName") or "Unknown"
 
     def get_team_key(self, team_id: str | None) -> str:
-        """Get team key from team ID."""
         if not team_id:
             return "???"
         team = self.teams.get(team_id, {})
         return team.get("key", "???")
 
     def get_project_name(self, project_id: str | None) -> str:
-        """Get project name from project ID."""
         if not project_id:
             return ""
         project = self.projects.get(project_id, {})
         return project.get("name", "")
 
     def get_label_name(self, label_id: str | None) -> str:
-        """Get label name from label ID."""
         if not label_id:
             return ""
         label = self.labels.get(label_id, {})
         return label.get("name", "")
 
     def get_cycles_for_team(self, team_id: str) -> list[dict[str, Any]]:
-        """Get all cycles for a team, sorted by number descending."""
         cycles = [c for c in self.cycles.values() if c.get("teamId") == team_id]
         return sorted(cycles, key=lambda c: c.get("number", 0), reverse=True)
 
     def get_documents_for_project(self, project_id: str) -> list[dict[str, Any]]:
-        """Get all documents for a project."""
         return [d for d in self.documents.values() if d.get("projectId") == project_id]
 
     def get_milestones_for_project(self, project_id: str) -> list[dict[str, Any]]:
-        """Get all milestones for a project, sorted by sortOrder."""
         milestones = [m for m in self.milestones.values() if m.get("projectId") == project_id]
         return sorted(milestones, key=lambda m: m.get("sortOrder", 0))
 
     def get_updates_for_project(self, project_id: str) -> list[dict[str, Any]]:
-        """Get all updates for a project, sorted by creation time descending."""
         updates = [u for u in self.project_updates.values() if u.get("projectId") == project_id]
         return sorted(updates, key=lambda u: u.get("createdAt", ""), reverse=True)
 
     def find_initiative(self, search: str) -> dict[str, Any] | None:
-        """Find an initiative by name or slugId (case-insensitive partial match)."""
         search_lower = search.lower()
         for initiative in self.initiatives.values():
             name = self._to_str(initiative.get("name", ""))
@@ -802,7 +918,6 @@ class LinearLocalReader:
         return None
 
     def find_document(self, search: str) -> dict[str, Any] | None:
-        """Find a document by title or slugId (case-insensitive partial match)."""
         search_lower = search.lower()
         for doc in self.documents.values():
             title = self._to_str(doc.get("title", ""))
