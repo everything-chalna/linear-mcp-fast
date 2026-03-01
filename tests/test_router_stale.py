@@ -304,3 +304,23 @@ def test_stale_metadata_multiple_sequential_reads(monkeypatch: pytest.MonkeyPatc
     assert result1["_metadata"]["stale"] is True
     assert result2["_metadata"]["stale"] is True
     assert len(official.calls) == 2
+
+
+def test_stale_metadata_does_not_mutate_original_dict(monkeypatch: pytest.MonkeyPatch):
+    """_inject_stale_metadata must not mutate the dict returned by the handler"""
+    reader = FakeReader(degraded=True)
+    official = FakeOfficial()
+    official.exceptions["list_issues"] = OfficialToolError("official_down", "offline")
+
+    original = {"source": "local-stale", "data": [1, 2, 3]}
+
+    def handler(_reader, **_kwargs):
+        return original
+
+    _install_local_handler(monkeypatch, handler)
+
+    router = ToolRouter(reader, official, coherence_window_seconds=30)
+    result = router.call_read("list_issues", {})
+
+    assert result["_metadata"]["stale"] is True
+    assert "_metadata" not in original

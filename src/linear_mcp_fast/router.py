@@ -62,8 +62,7 @@ class ToolRouter:
     def _inject_stale_metadata(self, result: Any) -> Any:
         """Add stale metadata to responses from degraded local cache."""
         if isinstance(result, dict):
-            result["_metadata"] = {"stale": True}
-            return result
+            return {**result, "_metadata": {"stale": True}}
         elif isinstance(result, list):
             return {"results": result, "_metadata": {"stale": True}}
         else:

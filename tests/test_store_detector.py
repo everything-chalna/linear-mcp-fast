@@ -16,6 +16,7 @@ from linear_mcp_fast.store_detector import (
     _is_team_record,
     _is_user_record,
     _is_workflow_state_record,
+    detect_stores,
 )
 
 
@@ -975,3 +976,213 @@ class TestIsProjectUpdateRecord:
     def test_empty_record(self) -> None:
         """Test that empty record returns False."""
         assert not _is_project_update_record({})
+
+
+# ---------------------------------------------------------------------------
+# Mock DB helpers for detect_stores integration tests
+# ---------------------------------------------------------------------------
+
+
+class _MockRecord:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+
+class _MockStore:
+    def __init__(self, records: list[_MockRecord]) -> None:
+        self._records = records
+
+    def iterate_records(self):
+        yield from self._records
+
+
+class _MockDB:
+    def __init__(self, stores: dict[str, _MockStore]) -> None:
+        self._stores = stores
+
+    @property
+    def object_store_names(self) -> list[str]:
+        return list(self._stores.keys())
+
+    def __getitem__(self, name: str) -> _MockStore:
+        return self._stores[name]
+
+
+# Sample records for each entity type
+_SAMPLE_RECORDS: dict[str, dict] = {
+    "issue": {"number": 1, "teamId": "t1", "stateId": "s1", "title": "Bug"},
+    "team": {"key": "ENG", "name": "Engineering"},
+    "user": {"name": "J", "displayName": "John", "email": "j@e.com"},
+    "workflow_state": {
+        "name": "In Progress",
+        "type": "started",
+        "color": "blue",
+        "teamId": "t1",
+    },
+    "comment": {
+        "issueId": "i1",
+        "userId": "u1",
+        "bodyData": "text",
+        "createdAt": "2025-01-01T00:00:00Z",
+    },
+    "project": {
+        "name": "P",
+        "teamIds": ["t1"],
+        "slugId": "s1",
+        "statusId": "st1",
+        "memberIds": ["u1"],
+    },
+    "issue_content": {"issueId": "i1", "contentState": b"yjs"},
+    "label": {"name": "bug", "color": "red", "isGroup": False},
+    "initiative": {
+        "name": "Q1",
+        "ownerId": "u1",
+        "slugId": "s1",
+        "frequencyResolution": "quarter",
+    },
+    "project_status": {
+        "name": "On Track",
+        "color": "green",
+        "position": 0,
+        "type": "active",
+        "indefinite": False,
+    },
+    "cycle": {
+        "number": 1,
+        "teamId": "t1",
+        "startsAt": "2025-01-01",
+        "endsAt": "2025-03-31",
+    },
+    "document": {
+        "title": "Doc",
+        "slugId": "s1",
+        "projectId": "p1",
+        "sortOrder": 1.0,
+    },
+    "document_content": {"documentContentId": "dc1", "contentData": b"yjs"},
+    "milestone": {
+        "name": "Alpha",
+        "projectId": "p1",
+        "sortOrder": 1.0,
+        "currentProgress": 50,
+    },
+    "project_update": {"body": "Update", "projectId": "p1"},
+}
+
+
+def _make_store(*records: dict) -> _MockStore:
+    return _MockStore([_MockRecord(r) for r in records])
+
+
+class TestDetectStores:
+    """Integration tests for the detect_stores() function."""
+
+    def test_single_issue_store_detected(self) -> None:
+        """Single issue store is detected correctly."""
+        db = _MockDB({"abc123": _make_store(_SAMPLE_RECORDS["issue"])})
+        result = detect_stores(db)
+        assert result.issues == "abc123"
+
+    def test_all_entity_types_detected(self) -> None:
+        """All 15 entity types are detected in one scan."""
+        stores = {
+            "store_issues": _make_store(_SAMPLE_RECORDS["issue"]),
+            "store_teams": _make_store(_SAMPLE_RECORDS["team"]),
+            "store_users": _make_store(_SAMPLE_RECORDS["user"]),
+            "store_wf": _make_store(_SAMPLE_RECORDS["workflow_state"]),
+            "store_comments": _make_store(_SAMPLE_RECORDS["comment"]),
+            "store_projects": _make_store(_SAMPLE_RECORDS["project"]),
+            "store_ic": _make_store(_SAMPLE_RECORDS["issue_content"]),
+            "store_labels": _make_store(_SAMPLE_RECORDS["label"]),
+            "store_init": _make_store(_SAMPLE_RECORDS["initiative"]),
+            "store_ps": _make_store(_SAMPLE_RECORDS["project_status"]),
+            "store_cycles": _make_store(_SAMPLE_RECORDS["cycle"]),
+            "store_docs": _make_store(_SAMPLE_RECORDS["document"]),
+            "store_dc": _make_store(_SAMPLE_RECORDS["document_content"]),
+            "store_mile": _make_store(_SAMPLE_RECORDS["milestone"]),
+            "store_pu": _make_store(_SAMPLE_RECORDS["project_update"]),
+        }
+        db = _MockDB(stores)
+        result = detect_stores(db)
+
+        assert result.issues == "store_issues"
+        assert result.teams == "store_teams"
+        assert result.users == ["store_users"]
+        assert result.workflow_states == ["store_wf"]
+        assert result.comments == "store_comments"
+        assert result.projects == "store_projects"
+        assert result.issue_content == "store_ic"
+        assert result.labels == ["store_labels"]
+        assert result.initiatives == "store_init"
+        assert result.project_statuses == "store_ps"
+        assert result.cycles == "store_cycles"
+        assert result.documents == "store_docs"
+        assert result.document_content == "store_dc"
+        assert result.milestones == "store_mile"
+        assert result.project_updates == "store_pu"
+
+    def test_underscore_prefix_stores_skipped(self) -> None:
+        """Stores with _ prefix are skipped."""
+        db = _MockDB({
+            "_meta": _make_store(_SAMPLE_RECORDS["issue"]),
+            "real": _make_store(_SAMPLE_RECORDS["issue"]),
+        })
+        result = detect_stores(db)
+        assert result.issues == "real"
+
+    def test_partial_stores_skipped(self) -> None:
+        """Stores with _partial in name are skipped."""
+        db = _MockDB({
+            "issues_partial_sync": _make_store(_SAMPLE_RECORDS["issue"]),
+            "real": _make_store(_SAMPLE_RECORDS["issue"]),
+        })
+        result = detect_stores(db)
+        assert result.issues == "real"
+
+    def test_non_dict_record_skips_store(self) -> None:
+        """Non-dict record values cause the store to be skipped."""
+        db = _MockDB({
+            "bad": _MockStore([_MockRecord("not a dict")]),
+            "good": _make_store(_SAMPLE_RECORDS["issue"]),
+        })
+        result = detect_stores(db)
+        assert result.issues == "good"
+
+    def test_exception_during_iteration_skips_store(self) -> None:
+        """Exception during iteration skips store, scanning continues."""
+
+        class _ExplodingStore:
+            def iterate_records(self):
+                raise RuntimeError("corrupt store")
+
+        db = _MockDB({
+            "bad": _ExplodingStore(),  # type: ignore[dict-item]
+            "good": _make_store(_SAMPLE_RECORDS["issue"]),
+        })
+        result = detect_stores(db)
+        assert result.issues == "good"
+
+    def test_list_fields_accumulate_multiple_stores(self) -> None:
+        """users, workflow_states, labels accumulate across multiple stores."""
+        db = _MockDB({
+            "users1": _make_store(_SAMPLE_RECORDS["user"]),
+            "users2": _make_store(_SAMPLE_RECORDS["user"]),
+            "wf1": _make_store(_SAMPLE_RECORDS["workflow_state"]),
+            "wf2": _make_store(_SAMPLE_RECORDS["workflow_state"]),
+            "lbl1": _make_store(_SAMPLE_RECORDS["label"]),
+            "lbl2": _make_store(_SAMPLE_RECORDS["label"]),
+        })
+        result = detect_stores(db)
+        assert result.users == ["users1", "users2"]
+        assert result.workflow_states == ["wf1", "wf2"]
+        assert result.labels == ["lbl1", "lbl2"]
+
+    def test_empty_db_returns_default(self) -> None:
+        """Empty DB returns DetectedStores with defaults (lists empty, rest None)."""
+        db = _MockDB({})
+        result = detect_stores(db)
+        assert result.issues is None
+        assert result.teams is None
+        assert result.users == []
+        assert result.workflow_states == []
+        assert result.labels == []
