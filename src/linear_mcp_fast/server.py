@@ -26,6 +26,9 @@ async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
         get_reader().refresh_cache(force=True)
     except Exception as exc:
         logger.warning("Cache init failed, starting degraded: %s", exc)
+    # Clear cached OAuth tokens so mcp-remote triggers a fresh browser login.
+    # This ensures the user can switch Linear accounts on every reconnect.
+    get_official().reauth()
     try:
         get_official().list_tools()
     except Exception as exc:

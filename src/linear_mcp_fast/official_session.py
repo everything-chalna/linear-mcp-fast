@@ -60,6 +60,7 @@ class OfficialMcpSessionManager:
         timeout_seconds: float = 30.0,
         sse_read_timeout_seconds: float = 300.0,
         read_timeout_seconds: float = 30.0,
+        auth_timeout_seconds: float = 180.0,
     ):
         self._transport = (transport or os.getenv("LINEAR_OFFICIAL_MCP_TRANSPORT", DEFAULT_TRANSPORT)).lower()
         self._url = url or os.getenv("LINEAR_OFFICIAL_MCP_URL", DEFAULT_OFFICIAL_MCP_URL)
@@ -71,6 +72,7 @@ class OfficialMcpSessionManager:
         self._timeout_seconds = timeout_seconds
         self._sse_read_timeout_seconds = sse_read_timeout_seconds
         self._read_timeout_seconds = read_timeout_seconds
+        self._auth_timeout_seconds = auth_timeout_seconds
 
         if self._transport not in {"stdio", "http"}:
             raise ValueError("LINEAR_OFFICIAL_MCP_TRANSPORT must be one of: stdio, http")
@@ -151,19 +153,29 @@ class OfficialMcpSessionManager:
         self._loop = loop
         self._thread = thread
 
-    def _submit(self, coro: Any) -> Any:
+    def _submit(self, coro: Any, timeout: float | None = None) -> Any:
         if not self._loop:
             raise RuntimeError("event loop not initialized")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
-            return future.result(timeout=self._read_timeout_seconds + 10)
+            return future.result(timeout=timeout or (self._read_timeout_seconds + 10))
         except concurrent.futures.TimeoutError:
             future.cancel()
             raise
 
-    async def _connect_async(self) -> None:
+    def _has_cached_tokens(self) -> bool:
+        """Check if mcp-remote has cached OAuth tokens for the configured URL."""
+        url_hash = hashlib.md5(self._url.encode()).hexdigest()  # noqa: S324
+        for cache_dir in self._find_token_cache_dirs():
+            if (cache_dir / f"{url_hash}_tokens.json").exists():
+                return True
+        return False
+
+    async def _connect_async(self, read_timeout: float | None = None) -> None:
         if self._session is not None:
             return
+
+        effective_read_timeout = read_timeout or self._read_timeout_seconds
 
         if self._transport == "stdio":
             params = StdioServerParameters(
@@ -192,7 +204,7 @@ class OfficialMcpSessionManager:
         self._session_cm = ClientSession(
             read_stream,
             write_stream,
-            read_timeout_seconds=timedelta(seconds=self._read_timeout_seconds),
+            read_timeout_seconds=timedelta(seconds=effective_read_timeout),
         )
         self._session = await self._session_cm.__aenter__()
         await self._session.initialize()
@@ -216,7 +228,14 @@ class OfficialMcpSessionManager:
 
     def _ensure_connected(self) -> None:
         self._ensure_loop()
-        self._submit(self._connect_async())
+        if self._has_cached_tokens():
+            self._submit(self._connect_async())
+        else:
+            logger.info("No cached OAuth tokens found; using extended timeout for browser auth")
+            self._submit(
+                self._connect_async(read_timeout=self._auth_timeout_seconds),
+                timeout=self._auth_timeout_seconds + 10,
+            )
 
     @staticmethod
     def _log_cleanup_exception(prefix: str, exc: Exception) -> None:
