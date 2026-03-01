@@ -149,3 +149,7 @@ class ToolRouter:
             "remoteReadUntil": self._remote_reads_until,
             "coherenceWindowSeconds": self._coherence_window_seconds,
         }
+
+    def reauth_official(self) -> dict[str, Any]:
+        """Force re-authentication of the official Linear MCP OAuth token."""
+        return self._official.reauth()

@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import logging
 import os
 import shlex
 import threading
+from pathlib import Path
 import time
 from datetime import timedelta
 from typing import Any
@@ -371,3 +373,60 @@ class OfficialMcpSessionManager:
             self._transport_cm = None
             self._loop = None
             self._thread = None
+
+    @staticmethod
+    def _find_token_cache_dirs() -> list[Path]:
+        """Find mcp-remote token cache directories."""
+        mcp_auth = Path.home() / ".mcp-auth"
+        if not mcp_auth.is_dir():
+            return []
+        return sorted(mcp_auth.glob("mcp-remote-*"))
+
+    def _clear_token_cache(self) -> dict[str, Any]:
+        """Delete cached OAuth tokens for the configured MCP URL."""
+        url_hash = hashlib.md5(self._url.encode()).hexdigest()  # noqa: S324
+        cache_dirs = self._find_token_cache_dirs()
+
+        deleted = 0
+        searched_dirs: list[str] = []
+
+        for cache_dir in cache_dirs:
+            searched_dirs.append(str(cache_dir))
+            for suffix in ("_tokens.json", "_client_info.json", "_code_verifier.txt"):
+                token_file = cache_dir / f"{url_hash}{suffix}"
+                if token_file.exists():
+                    try:
+                        token_file.unlink()
+                        deleted += 1
+                        logger.info("Deleted token cache file: %s", token_file)
+                    except OSError as exc:
+                        logger.warning("Failed to delete token cache file %s: %s", token_file, exc)
+
+        return {
+            "urlHash": url_hash,
+            "deletedFiles": deleted,
+            "searchedDirs": searched_dirs,
+        }
+
+    def reauth(self) -> dict[str, Any]:
+        """Force re-authentication by clearing cached tokens and disconnecting."""
+        with self._lock:
+            # Disconnect existing session
+            if self._session is not None:
+                try:
+                    self._submit(self._disconnect_async())
+                except Exception as exc:
+                    self._log_cleanup_exception("Disconnect during reauth failed", exc)
+
+            # Clear token cache
+            cache_result = self._clear_token_cache()
+            logger.info(
+                "OAuth reauth triggered: deleted %d cached token files",
+                cache_result["deletedFiles"],
+            )
+
+            return {
+                "status": "reauth_triggered",
+                "message": "OAuth tokens cleared. Next official MCP call will trigger fresh OAuth login.",
+                **cache_result,
+            }

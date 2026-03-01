@@ -440,6 +440,23 @@ def list_official_tools() -> list[str]:
 
 
 @mcp.tool()
+def reauth_official() -> dict[str, Any]:
+    """Force re-authentication of the official Linear MCP OAuth token.
+
+    Clears cached OAuth tokens and disconnects the current session.
+    The next tool call will trigger a fresh OAuth login flow via mcp-remote.
+    Use this when:
+    - OAuth token has expired or become invalid
+    - You need to change the authenticated Linear account
+    - Some teams/projects are not accessible (scope issues)
+
+    Returns:
+        dict with status, message, urlHash, deletedFiles, and searchedDirs.
+    """
+    return get_router().reauth_official()
+
+
+@mcp.tool()
 def refresh_cache() -> dict[str, Any]:
     """Force reload of local cache and return health state."""
     return get_router().refresh_local_cache()
