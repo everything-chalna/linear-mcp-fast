@@ -14,14 +14,14 @@ import os
 import re
 import threading
 import time
-
-logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from typing import Any
 
 from ccl_chromium_reader import ccl_chromium_indexeddb  # type: ignore
 
 from .store_detector import DetectedStores, detect_stores
+
+logger = logging.getLogger(__name__)
 
 LINEAR_DB_PATH = os.path.expanduser(
     "~/Library/Application Support/Linear/IndexedDB/https_linear.app_0.indexeddb.leveldb"
