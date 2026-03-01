@@ -326,28 +326,23 @@ class OfficialMcpSessionManager:
         raise OfficialToolError("official_unavailable", "official MCP unavailable")
 
     def list_tools(self) -> list[str]:
+        """Return tool names from the official MCP session.
+
+        Does NOT attempt to connect or reconnect — this is a read-only
+        diagnostic call that should never trigger OAuth browser popups.
+        """
         with self._lock:
-            for attempt in range(2):
-                try:
-                    self._ensure_connected()
-                    if self._session is None:
-                        return []
-                    result = self._submit(self._session.list_tools())
-                    tools = getattr(result, "tools", []) or []
-                    self._record_success()
-                    return [t.name for t in tools if getattr(t, "name", None)]
-                except Exception as exc:
-                    self._record_failure(exc)
-                    try:
-                        self._submit(self._disconnect_async())
-                    except Exception as cleanup_exc:
-                        self._log_cleanup_exception("Official MCP disconnect failed", cleanup_exc)
-                    if attempt == 1:
-                        raise OfficialToolError(
-                            "official_unavailable",
-                            f"official MCP list_tools failed: {exc}",
-                        ) from exc
-            return []
+            if self._session is None:
+                return []
+            try:
+                result = self._submit(self._session.list_tools())
+                tools = getattr(result, "tools", []) or []
+                self._record_success()
+                return [t.name for t in tools if getattr(t, "name", None)]
+            except Exception as exc:
+                self._record_failure(exc)
+                logger.warning("list_tools failed: %s", exc)
+                return []
 
     def get_health(self) -> dict[str, Any]:
         with self._lock:
