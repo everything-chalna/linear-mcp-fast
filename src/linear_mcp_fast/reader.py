@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import threading
 import time
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -542,12 +545,13 @@ class LinearLocalReader:
 
                 cache = CachedData(loaded_at=time.time())
                 load_errors: list[str] = []
+                soft_errors: list[str] = []
                 detected_keys: set[str] = set()
 
                 for db in databases:
                     stores = detect_stores(db)
                     detected_keys.update(self._detected_store_keys(stores))
-                    self._load_from_db(db, stores, cache, load_errors)
+                    self._load_from_db(db, stores, cache, load_errors, soft_errors)
 
                 self._apply_account_scope(cache)
 
@@ -569,6 +573,11 @@ class LinearLocalReader:
                 elif load_errors:
                     self._set_degraded(f"store read errors: {len(load_errors)}")
                 else:
+                    if soft_errors:
+                        logger.warning(
+                            "non-critical store read errors (ignored): %s",
+                            "; ".join(soft_errors),
+                        )
                     self._set_healthy()
             except Exception as exc:
                 self._set_degraded(str(exc))
@@ -580,6 +589,7 @@ class LinearLocalReader:
         stores: DetectedStores,
         cache: CachedData,
         load_errors: list[str],
+        soft_errors: list[str] | None = None,
     ) -> None:
         """Load data from a single database into the cache."""
 
@@ -689,7 +699,8 @@ class LinearLocalReader:
                 }
 
         if stores.issue_content:
-            for val in self._load_from_store(db, stores.issue_content, load_errors):
+            _ic_errors = soft_errors if soft_errors is not None else load_errors
+            for val in self._load_from_store(db, stores.issue_content, _ic_errors):
                 issue_id = val.get("issueId")
                 content_state = val.get("contentState")
                 if issue_id and content_state:
