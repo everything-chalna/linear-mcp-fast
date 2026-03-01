@@ -59,6 +59,16 @@ class ToolRouter:
             return False
         return tool_name.startswith(WRITE_TOOL_PREFIXES)
 
+    def _inject_stale_metadata(self, result: Any) -> Any:
+        """Add stale metadata to responses from degraded local cache."""
+        if isinstance(result, dict):
+            result["_metadata"] = {"stale": True}
+            return result
+        elif isinstance(result, list):
+            return {"results": result, "_metadata": {"stale": True}}
+        else:
+            return result
+
     def _call_local(
         self,
         tool_name: str,
@@ -107,7 +117,8 @@ class ToolRouter:
                         "Returning stale local for %s because remote failed during remote-first window",
                         tool_name,
                     )
-                    return self._call_local(tool_name, args, allow_degraded=True)
+                    result = self._call_local(tool_name, args, allow_degraded=True)
+                    return self._inject_stale_metadata(result)
                 raise remote_error
 
             try:
@@ -121,7 +132,8 @@ class ToolRouter:
                         "Returning stale local for %s because remote is unavailable and local is degraded",
                         tool_name,
                     )
-                    return self._call_local(tool_name, args, allow_degraded=True)
+                    result = self._call_local(tool_name, args, allow_degraded=True)
+                    return self._inject_stale_metadata(result)
                 raise
         except Exception:
             logger.exception("Unexpected local error for %s", tool_name)

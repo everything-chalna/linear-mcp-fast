@@ -109,7 +109,7 @@ def test_degraded_local_returns_stale_local_if_remote_down(monkeypatch: pytest.M
     router = ToolRouter(reader, official, coherence_window_seconds=30)
     result = router.call_read("list_issues", {})
 
-    assert result == {"source": "local-stale"}
+    assert result == {"source": "local-stale", "_metadata": {"stale": True}}
     assert len(official.calls) == 1
 
 
@@ -203,7 +203,7 @@ def test_remote_first_degraded_local_does_not_retry_official_twice(monkeypatch: 
     router.call_official("create_issue", {"title": "T"})
     result = router.call_read("list_issues", {})
 
-    assert result == {"source": "local-stale"}
+    assert result == {"source": "local-stale", "_metadata": {"stale": True}}
     assert len(official.calls) == 2
 
 
